@@ -5,15 +5,17 @@ Implementation of the Maximum A Posteriori Policy Optimization
 Reinforcement Learning Algorithms for continuous  control
 on [OpenAI gym](https://github.com/openai/gym) environments.
 
-## How to work
+## How to use
 
 ```bash
-python3 main_continuous.py --log --log_dir log --render
+python3 main_continuous.py --env Pendulum-v0 --iteration_num 300 --log --log_dir log --render
 ```
 
-## TEST Comprehension
+## Support
 
-- [x] Pendulum-v0
+* Policy Evaluation
+    - [x] 1-step TD
+    - [ ] Retrace
 
 ## License
 
