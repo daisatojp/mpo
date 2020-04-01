@@ -1,7 +1,7 @@
 # MPO
 
 Implementation of the Maximum A Posteriori Policy Optimization
-([paper1](https://arxiv.org/abs/1806.06920), [paper2](https://arxiv.org/pdf/1812.02256.pdf))
+([paper1](https://arxiv.org/abs/1806.06920), [paper2](https://arxiv.org/abs/1812.02256.pdf))
 Reinforcement Learning Algorithms for continuous  control
 on [OpenAI gym](https://github.com/openai/gym) environments.
 
