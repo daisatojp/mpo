@@ -9,6 +9,7 @@ from tensorboardX import SummaryWriter
 import gym
 from mpo_continuous.actor import Actor
 from mpo_continuous.critic import Critic
+from mpo_continuous.replaybuffer import ReplayBuffer
 
 
 def bt(m):
@@ -119,33 +120,25 @@ class MPO(object):
         # control/log variables
         self.iteration = 0
 
+        self.replaybuffer = ReplayBuffer()
+
     def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
-        states = []
-        actions = []
-        next_states = []
-        rewards = []
+        self.replaybuffer.clear()
         for i in range(sample_episode_num):
             state = self.env.reset()
             for steps in range(sample_episode_maxlen):
-                action = np.reshape(
-                    self.target_actor.action(torch.from_numpy(state).type(torch.float32)).numpy(),
-                    -1)
+                action = self.target_actor.action(
+                    torch.from_numpy(state).type(torch.float32)
+                ).numpy().flatten()
                 next_state, reward, done, _ = self.env.step(action)
                 if render and i == 0:
                     self.env.render()
-                states.append(state)
-                actions.append(action)
-                next_states.append(next_state)
-                rewards.append(reward)
+                self.replaybuffer.store(state, action, next_state, reward)
                 if done:
                     break
                 else:
                     state = next_state
-        states = np.array(states)
-        actions = np.array(actions)
-        next_states = np.array(next_states)
-        rewards = np.array(rewards)
-        return states, actions, next_states, rewards
+            self.replaybuffer.done_episode()
 
     def _critic_update(self, states, rewards, actions, mean_next_q):
         """
@@ -191,11 +184,11 @@ class MPO(object):
             writer = None
 
         for it in range(self.iteration, iteration_num):
-            states, actions, next_states, rewards = self.__sample_trajectory(
+            self.__sample_trajectory(
                 self.sample_episode_num, self.sample_episode_maxlen, render)
-            buff_sz = len(states)
+            buff_sz = len(self.replaybuffer)
 
-            mean_reward = np.mean(rewards)
+            mean_reward = self.replaybuffer.mean_reward()
             mean_q_loss = []
             mean_lagrange = []
 
@@ -204,10 +197,13 @@ class MPO(object):
                 for indices in tqdm(BatchSampler(SubsetRandomSampler(range(buff_sz)), self.mb_size, False)):
                     B = len(indices)
 
-                    state_batch = torch.from_numpy(states[indices]).type(torch.float32)
-                    action_batch = torch.from_numpy(actions[indices]).type(torch.float32)
-                    next_state_batch = torch.from_numpy(next_states[indices]).type(torch.float32)
-                    reward_batch = torch.from_numpy(rewards[indices]).type(torch.float32)
+                    state_batch, action_batch, next_state_batch, reward_batch = zip(
+                        *[self.replaybuffer[index] for index in indices])
+
+                    state_batch = torch.from_numpy(np.stack(state_batch)).type(torch.float32)
+                    action_batch = torch.from_numpy(np.stack(action_batch)).type(torch.float32)
+                    next_state_batch = torch.from_numpy(np.stack(next_state_batch)).type(torch.float32)
+                    reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32)
 
                     # sample M additional action for each state
                     target_μ, target_A = self.target_actor.forward(state_batch)
