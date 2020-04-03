@@ -28,11 +28,15 @@ class Actor(nn.Module):
         :param states: ([State]) a (batch of) state(s) of the environment
         :return: ([float])([float]) mean and cholesky factorization chosen by policy at given state
         """
+        device = self.lin1.weight.device
+        if self.action_range.device != device:
+            self.action_range = self.action_range.to(device)
+
         x = F.relu(self.lin1(states))
         x = F.relu(self.lin2(x))
         mean = self.action_range * torch.tanh(self.mean_layer(x))
         cholesky_vector = F.softplus(self.cholesky_layer(x))
-        cholesky = torch.eye(self.action_shape)[None, ...].repeat(cholesky_vector.size(0), 1, 1) @ cholesky_vector[..., None]
+        cholesky = torch.eye(self.action_shape)[None, ...].repeat(cholesky_vector.size(0), 1, 1).to(device) @ cholesky_vector[..., None]
         return mean, cholesky
 
     def action(self, state):

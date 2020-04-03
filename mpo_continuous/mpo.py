@@ -79,6 +79,7 @@ class MPO(object):
                  mb_size=64,
                  lagrange_iteration_num=5,
                  add_act=64):
+        self.gpu = 0
         self.env = env
 
         self.ε = dual_constraint  # hard constraint for the KL
@@ -96,10 +97,10 @@ class MPO(object):
         self.action_shape = env.action_space.shape[0]
         self.action_range = torch.from_numpy(env.action_space.high)
 
-        self.actor = Actor(env)
-        self.critic = Critic(env)
-        self.target_actor = Actor(env)
-        self.target_critic = Critic(env)
+        self.actor = Actor(env).to(self.gpu)
+        self.critic = Critic(env).to(self.gpu)
+        self.target_actor = Actor(env).to(self.gpu)
+        self.target_critic = Critic(env).to(self.gpu)
 
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(param.data)
@@ -120,7 +121,7 @@ class MPO(object):
         # control/log variables
         self.iteration = 0
 
-        self.replaybuffer = ReplayBuffer()
+        self.replaybuffer = ReplayBuffer(backward_length=0)
 
     def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
         self.replaybuffer.clear()
@@ -128,8 +129,8 @@ class MPO(object):
             state = self.env.reset()
             for steps in range(sample_episode_maxlen):
                 action = self.target_actor.action(
-                    torch.from_numpy(state).type(torch.float32)
-                ).numpy().flatten()
+                    torch.from_numpy(state).type(torch.float32).to(self.gpu)
+                ).cpu().numpy().flatten()
                 next_state, reward, done, _ = self.env.step(action)
                 if render and i == 0:
                     self.env.render()
@@ -165,6 +166,61 @@ class MPO(object):
         self.critic_optimizer.zero_grad()
         t = self.critic(state_batch, action_batch).squeeze()
         loss = self.mse_loss(y, t)
+        loss.backward()
+        self.critic_optimizer.step()
+        return loss.item()
+
+    def __update_critic_retrace(
+            self, states_batch, actions_batch, next_states_batch, rewards_batch, A=64):
+        """
+        :param states_batch: (B, L, ds)
+        :param actions_batch: (B, L, da)
+        :param next_states_batch: (B, L, ds)
+        :param rewards_batch: (B, L)
+        :return:
+        """
+        B = states_batch.size(0)
+        L = states_batch.size(1)
+        ds = states_batch.size(-1)
+        da = actions_batch.size(-1)
+        state_batch = states_batch[:, 0, :]  # (B, ds)
+        action_batch = actions_batch[:, 0, :]  # (B, da)
+
+        with torch.no_grad():
+            r = rewards_batch  # (B, L)
+
+            Qφ = self.target_critic.forward(
+                states_batch.reshape(-1, ds),
+                actions_batch.reshape(-1, da)
+            ).reshape(B, L)  # (B, L)
+
+            π_μ_next, π_Σ_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L,)
+            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)
+            next_sampled_actions_batch = π_next.sample((A,)).transpose(0, 1).reshape(B, L, A, da)  # (B, L, A, da)
+            next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, A, -1)  # (B, L, A, ds)
+            EQφ = self.target_critic.forward(
+                next_expanded_states_batch.reshape(-1, ds),
+                next_sampled_actions_batch.reshape(-1, da)
+            ).reshape(B, L, A).mean(dim=-1)  # (B, L)
+
+            π_μ, π_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
+            π = MultivariateNormal(π_μ.reshape(B, L, 1), scale_tril=π_Σ.reshape(B, L, 1, 1))  # (B, L)
+            b_μ, b_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
+            b = MultivariateNormal(b_μ.reshape(B, L, 1), scale_tril=b_Σ.reshape(B, L, 1, 1))  # (B, L)
+            c = π.log_prob(actions_batch).exp() / b.log_prob(actions_batch).exp()  # (B, L)
+            c = torch.clamp_max(c, 1.0)  # (B, L)
+            c[:, 0] = 1.0  # (B, L)
+            c = torch.cumprod(c, dim=1)  # (B, L)
+
+            γ = torch.ones(size=(B, L), dtype=torch.float32) * self.γ  # (B, L)
+            γ[:, 0] = 1.0  # (B, L)
+            γ = torch.cumprod(γ, dim=1)  # (B, L)
+
+            Qret = (Qφ[:, 0] + (γ * c * (r + EQφ - Qφ)).sum(dim=1))  # (B,)
+
+        self.critic_optimizer.zero_grad()
+        Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
+        loss = self.mse_loss(Qθ, Qret)
         loss.backward()
         self.critic_optimizer.step()
         return loss.item()
@@ -212,10 +268,10 @@ class MPO(object):
                     states_batch, actions_batch, next_states_batch, rewards_batch = zip(
                         *[self.replaybuffer[index] for index in indices])
 
-                    states_batch = torch.from_numpy(np.stack(states_batch)).type(torch.float32)  # (B, L, ds)
-                    actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32)  # (B, L, da)
-                    next_states_batch = torch.from_numpy(np.stack(next_states_batch)).type(torch.float32)  # (B, L, ds)
-                    rewards_batch = torch.from_numpy(np.stack(rewards_batch)).type(torch.float32)  # (B, L)
+                    states_batch = torch.from_numpy(np.stack(states_batch)).type(torch.float32).to(self.gpu)  # (B, L, ds)
+                    actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32).to(self.gpu)  # (B, L, da)
+                    next_states_batch = torch.from_numpy(np.stack(next_states_batch)).type(torch.float32).to(self.gpu)  # (B, L, ds)
+                    rewards_batch = torch.from_numpy(np.stack(rewards_batch)).type(torch.float32).to(self.gpu)  # (B, L)
 
                     state_batch = states_batch[:, 0, :]
                     action_batch = actions_batch[:, 0, :]
@@ -229,6 +285,12 @@ class MPO(object):
                         next_state_batch=next_state_batch,
                         reward_batch=reward_batch
                     )
+                    # q_loss = self.__update_critic_retrace(
+                    #     states_batch=states_batch,
+                    #     actions_batch=actions_batch,
+                    #     next_states_batch=next_states_batch,
+                    #     rewards_batch=rewards_batch
+                    # )
                     mean_q_loss.append(q_loss)
 
                     # sample M additional action for each state
@@ -241,12 +303,10 @@ class MPO(object):
                     for i in range(self.M):
                         action = action_distribution.sample()
                         additional_action.append(action)
-                        additional_target_q.append(
-                            self.target_critic.forward(
-                                state_batch, action).detach().numpy())
+                        additional_target_q.append(self.target_critic.forward(state_batch, action))
                     additional_action = torch.stack(additional_action).squeeze()  # (M, B)
-                    additional_target_q = np.array(additional_target_q).squeeze()  # (M, B)
-
+                    additional_target_q = torch.stack(additional_target_q).squeeze()  # (M, B)
+                    additional_target_q_np = additional_target_q.cpu().detach().numpy()  # (M, B)
 
                     # E-step
                     # Update Dual-function
@@ -255,16 +315,16 @@ class MPO(object):
                         Dual function of the non-parametric variational
                         g(η) = η*ε + η \sum \log (\sum \exp(Q(a, s)/η))
                         """
-                        max_q = np.max(additional_target_q, 0)
+                        max_q = np.max(additional_target_q_np, 0)
                         return η * self.ε + np.mean(max_q) \
-                            + η * np.mean(np.log(np.mean(np.exp((additional_target_q - max_q) / η), 0)))
+                            + η * np.mean(np.log(np.mean(np.exp((additional_target_q_np - max_q) / η), 0)))
 
                     bounds = [(1e-6, None)]
                     res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=bounds)
                     self.η = res.x[0]
 
                     # calculate the new q values
-                    qij = torch.softmax(torch.tensor(additional_target_q) / self.η, dim=0)
+                    qij = torch.softmax(additional_target_q / self.η, dim=0)
 
                     # M-step
                     # update policy based on lagrangian
