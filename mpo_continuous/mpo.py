@@ -149,21 +149,24 @@ class MPO(object):
         :param mean_next_q: ([State]) target Q values
         :return: (float) q-loss
         """
-        next_target_μ, next_target_A = self.target_actor.forward(next_states)
-        next_target_μ.detach()
-        next_target_A.detach()
-        next_action_distribution = MultivariateNormal(next_target_μ, scale_tril=next_target_A)
-        additional_target_next_q = []
-        for i in range(self.M):
-            next_action = next_action_distribution.sample()
-            additional_target_next_q.append(
-                self.target_critic.forward(
-                    next_states, next_action).detach())
-        additional_target_next_q = torch.stack(additional_target_next_q).squeeze()  # (M, B)
-        y = rewards + self.γ * torch.mean(additional_target_next_q, dim=0)
+        B = states.size(0)
+        ds = states.size(-1)
+        da = actions.size(-1)
+        A = 64
+        π_μ, π_A = self.target_actor.forward(next_states)  # (B,)
+        π_μ.detach()
+        π_A.detach()
+        π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
+        sampled_next_actions = π.sample((A,)).transpose(0, 1)  # (B, A, da)
+        expanded_next_states = next_states.reshape(B, 1, ds).expand((B, A, ds))  # (B, A, ds)
+        next_q = self.target_critic.forward(
+            expanded_next_states.reshape(-1, ds),
+            sampled_next_actions.reshape(-1, da)
+        ).reshape(B, A).mean(dim=1).detach()  # (B,)
+        y = rewards + self.γ * next_q
         self.critic_optimizer.zero_grad()
-        target = self.critic(states, actions)
-        loss_critic = self.mse_loss(y, target.squeeze())
+        t = self.critic(states, actions).squeeze()
+        loss_critic = self.mse_loss(y, t)
         loss_critic.backward()
         self.critic_optimizer.step()
         return loss_critic.item()
