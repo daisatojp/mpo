@@ -140,36 +140,34 @@ class MPO(object):
                     state = next_state
             self.replaybuffer.done_episode()
 
-    def __critic_update_td(self, states, actions, next_states, rewards):
+    def __critic_update_td(self, state_batch, action_batch, next_state_batch, reward_batch, A=64):
         """
-        Updates the critics
-        :param states: ([State]) mini-batch of states
-        :param actions: ([Action]) mini-batch of actions
-        :param rewards: ([Reward]) mini-batch of rewards
-        :param mean_next_q: ([State]) target Q values
-        :return: (float) q-loss
+        :param state_batch: (B, ds)
+        :param action_batch: (B, da)
+        :param next_state_batch: (B, ds)
+        :param reward_batch: (B,)
+        :return:
         """
-        B = states.size(0)
-        ds = states.size(-1)
-        da = actions.size(-1)
-        A = 64
-        π_μ, π_A = self.target_actor.forward(next_states)  # (B,)
-        π_μ.detach()
-        π_A.detach()
-        π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
-        sampled_next_actions = π.sample((A,)).transpose(0, 1)  # (B, A, da)
-        expanded_next_states = next_states.reshape(B, 1, ds).expand((B, A, ds))  # (B, A, ds)
-        next_q = self.target_critic.forward(
-            expanded_next_states.reshape(-1, ds),
-            sampled_next_actions.reshape(-1, da)
-        ).reshape(B, A).mean(dim=1).detach()  # (B,)
-        y = rewards + self.γ * next_q
+        B = state_batch.size(0)
+        ds = state_batch.size(-1)
+        da = action_batch.size(-1)
+        with torch.no_grad():
+            r = reward_batch  # (B,)
+            π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
+            π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
+            sampled_next_actions = π.sample((A,)).transpose(0, 1)  # (B, A, da)
+            expanded_next_states = next_state_batch.reshape(B, 1, ds).expand((B, A, ds))  # (B, A, ds)
+            next_q = self.target_critic.forward(
+                expanded_next_states.reshape(-1, ds),
+                sampled_next_actions.reshape(-1, da)
+            ).reshape(B, A).mean(dim=1)  # (B,)
+            y = r + self.γ * next_q
         self.critic_optimizer.zero_grad()
-        t = self.critic(states, actions).squeeze()
-        loss_critic = self.mse_loss(y, t)
-        loss_critic.backward()
+        t = self.critic(state_batch, action_batch).squeeze()
+        loss = self.mse_loss(y, t)
+        loss.backward()
         self.critic_optimizer.step()
-        return loss_critic.item()
+        return loss.item()
 
     def _update_param(self):
         """
@@ -236,10 +234,10 @@ class MPO(object):
 
                     # Update Q-function
                     q_loss = self.__critic_update_td(
-                        states=state_batch,
-                        actions=action_batch,
-                        next_states=next_state_batch,
-                        rewards=reward_batch
+                        state_batch=state_batch,
+                        action_batch=action_batch,
+                        next_state_batch=next_state_batch,
+                        reward_batch=reward_batch
                     )
                     mean_q_loss.append(q_loss)
 
