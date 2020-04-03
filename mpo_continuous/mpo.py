@@ -75,10 +75,10 @@ class MPO(object):
                  alpha=10,
                  sample_episode_num=30,
                  sample_episode_maxlen=200,
+                 sample_action_num=64,
                  rerun_num=5,
                  mb_size=64,
-                 lagrange_iteration_num=5,
-                 add_act=64):
+                 lagrange_iteration_num=5):
         self.gpu = 0
         self.env = env
 
@@ -90,10 +90,10 @@ class MPO(object):
 
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxlen = sample_episode_maxlen
+        self.sample_action_num = sample_action_num
         self.rerun_num = rerun_num
         self.mb_size = mb_size
         self.lagrange_iteration_num = lagrange_iteration_num
-        self.M = add_act
         self.action_shape = env.action_space.shape[0]
         self.action_range = torch.from_numpy(env.action_space.high)
 
@@ -263,6 +263,7 @@ class MPO(object):
             for _ in range(self.rerun_num):
                 for indices in tqdm(BatchSampler(SubsetRandomSampler(range(buff_sz)), self.mb_size, False)):
                     B = len(indices)
+                    M = self.sample_action_num
                     L = self.replaybuffer.backward_length
 
                     states_batch, actions_batch, next_states_batch, rewards_batch = zip(
@@ -278,12 +279,16 @@ class MPO(object):
                     next_state_batch = next_states_batch[:, 0, :]
                     reward_batch = rewards_batch[:, 0]
 
+                    ds = state_batch.size(-1)
+                    da = action_batch.size(-1)
+
                     # Policy Evaluation
                     q_loss = self.__critic_update_td(
                         state_batch=state_batch,
                         action_batch=action_batch,
                         next_state_batch=next_state_batch,
-                        reward_batch=reward_batch
+                        reward_batch=reward_batch,
+                        A=self.sample_action_num
                     )
                     # q_loss = self.__update_critic_retrace(
                     #     states_batch=states_batch,
@@ -294,19 +299,16 @@ class MPO(object):
                     mean_q_loss.append(q_loss)
 
                     # sample M additional action for each state
-                    target_μ, target_A = self.target_actor.forward(state_batch)
-                    target_μ.detach()
-                    target_A.detach()
-                    action_distribution = MultivariateNormal(target_μ, scale_tril=target_A)
-                    additional_action = []
-                    additional_target_q = []
-                    for i in range(self.M):
-                        action = action_distribution.sample()
-                        additional_action.append(action)
-                        additional_target_q.append(self.target_critic.forward(state_batch, action))
-                    additional_action = torch.stack(additional_action).squeeze()  # (M, B)
-                    additional_target_q = torch.stack(additional_target_q).squeeze()  # (M, B)
-                    additional_target_q_np = additional_target_q.cpu().detach().numpy()  # (M, B)
+                    with torch.no_grad():
+                        b_μ, b_A = self.target_actor.forward(state_batch)  # (B,)
+                        b = MultivariateNormal(b_μ, scale_tril=b_A)  # (B,)
+                        sampled_actions = b.sample((M,))  # (M, B, da)
+                        expanded_states = state_batch[None, ...].expand(M, B, ds)  # (M, B, ds)
+                        target_q = self.target_critic.forward(
+                            expanded_states.reshape(-1, ds),
+                            sampled_actions.reshape(-1, da)
+                        ).reshape(M, B)  # (M, B)
+                        target_q_np = target_q.cpu().numpy()  # (M, B)
 
                     # E-step
                     # Update Dual-function
@@ -315,27 +317,26 @@ class MPO(object):
                         Dual function of the non-parametric variational
                         g(η) = η*ε + η \sum \log (\sum \exp(Q(a, s)/η))
                         """
-                        max_q = np.max(additional_target_q_np, 0)
+                        max_q = np.max(target_q_np, 0)
                         return η * self.ε + np.mean(max_q) \
-                            + η * np.mean(np.log(np.mean(np.exp((additional_target_q_np - max_q) / η), 0)))
+                            + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q) / η), 0)))
 
                     bounds = [(1e-6, None)]
                     res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=bounds)
                     self.η = res.x[0]
 
-                    # calculate the new q values
-                    qij = torch.softmax(additional_target_q / self.η, dim=0)
+                    qij = torch.softmax(target_q / self.η, dim=0)
 
                     # M-step
                     # update policy based on lagrangian
                     for _ in range(self.lagrange_iteration_num):
                         μ, A = self.actor.forward(state_batch)
                         π = MultivariateNormal(μ, scale_tril=A)  # (B,)
-                        additional_logprob = qij * π.expand((self.M, B)).log_prob(additional_action[..., None])
+                        loss_pi = torch.mean(qij * π.expand((M, B)).log_prob(sampled_actions))
 
                         C_μ, C_Σ = gaussian_kl(
-                            mean1=μ, mean2=target_μ,
-                            cholesky1=A, cholesky2=target_A)
+                            mean1=μ, mean2=b_μ,
+                            cholesky1=A, cholesky2=b_A)
 
                         # Update lagrange multipliers by gradient descent
                         self.η_μ -= self.α * (self.ε_μ - C_μ).detach().item()
@@ -348,7 +349,7 @@ class MPO(object):
 
                         self.actor_optimizer.zero_grad()
                         loss_policy = -(
-                                torch.mean(additional_logprob)
+                                loss_pi
                                 + self.η_μ * (self.ε_μ - C_μ)
                                 + self.η_Σ * (self.ε_Σ - C_Σ)
                         )

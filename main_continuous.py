@@ -64,6 +64,9 @@ def _parse():
         '--sample_episode_maxlen', type=int, default=200,
         help='length of an episode (number of training steps)')
     parser.add_argument(
+        '--sample_action_num', type=int, default=64,
+        help='number of sampled actions')
+    parser.add_argument(
         '--rerun_num', type=int, default=5,
         help='number of reruns of the mini batch')
     parser.add_argument(
@@ -72,9 +75,6 @@ def _parse():
     parser.add_argument(
         '--lagrange_iteration_num', type=int, default=5,
         help='number of optimization steps of the Lagrangian')
-    parser.add_argument(
-        '--add_act', type=int, default=64,
-        help='number of additional actions')
     parser.add_argument(
         '--iteration_num', type=int, default=1000,
         help='number of iteration to learn')
@@ -108,10 +108,10 @@ def main():
                 alpha=model_args['alpha'],
                 sample_episode_num=model_args['sample_episode_num'],
                 sample_episode_maxlen=model_args['sample_episode_maxlen'],
+                sample_action_num=model_args['sample_action_num'],
                 rerun_num=model_args['rerun_num'],
                 mb_size=model_args['mb_size'],
-                lagrange_iteration_num=model_args['lagrange_iteration_num'],
-                add_act=model_args['add_act'])
+                lagrange_iteration_num=model_args['lagrange_iteration_num'])
     if model_args['load'] is not None:
         model.load_model(model_args['load'])
     if model_args['train']:
