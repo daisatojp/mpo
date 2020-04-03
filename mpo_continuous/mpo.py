@@ -147,6 +147,7 @@ class MPO(object):
         :param action_batch: (B, da)
         :param next_state_batch: (B, ds)
         :param reward_batch: (B,)
+        :param A:
         :return:
         """
         B = state_batch.size(0)
