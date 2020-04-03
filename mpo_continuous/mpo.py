@@ -210,18 +210,23 @@ class MPO(object):
                     target_μ.detach()
                     target_A.detach()
                     action_distribution = MultivariateNormal(target_μ, scale_tril=target_A)
+                    next_target_μ, next_target_A = self.target_actor.forward(next_state_batch)
+                    next_target_μ.detach()
+                    next_target_A.detach()
+                    next_action_distribution = MultivariateNormal(next_target_μ, scale_tril=next_target_A)
                     additional_action = []
                     additional_target_q = []
                     additional_target_next_q = []
                     for i in range(self.M):
                         action = action_distribution.sample()
+                        next_action = next_action_distribution.sample()
                         additional_action.append(action)
                         additional_target_q.append(
                             self.target_critic.forward(
                                 state_batch, action).detach().numpy())
                         additional_target_next_q.append(
                             self.target_critic.forward(
-                                next_state_batch, action).detach())
+                                next_state_batch, next_action).detach())
                     additional_action = torch.stack(additional_action).squeeze()  # (M, B)
                     additional_target_q = np.array(additional_target_q).squeeze()  # (M, B)
                     additional_target_next_q = torch.stack(additional_target_next_q).squeeze()  # (M, B)
@@ -304,6 +309,7 @@ class MPO(object):
                 writer.add_scalar('reward', mean_reward, it + 1)
                 writer.add_scalar('lagrange', mean_lagrange, it + 1)
                 writer.add_scalar('qloss', mean_q_loss, it + 1)
+                writer.flush()
 
         # end training
         if writer is not None:
