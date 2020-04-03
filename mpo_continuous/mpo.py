@@ -207,14 +207,29 @@ class MPO(object):
             for _ in range(self.rerun_num):
                 for indices in tqdm(BatchSampler(SubsetRandomSampler(range(buff_sz)), self.mb_size, False)):
                     B = len(indices)
+                    L = self.replaybuffer.backward_length
 
-                    state_batch, action_batch, next_state_batch, reward_batch = zip(
+                    states_batch, actions_batch, next_states_batch, rewards_batch = zip(
                         *[self.replaybuffer[index] for index in indices])
 
-                    state_batch = torch.from_numpy(np.stack(state_batch)).type(torch.float32)
-                    action_batch = torch.from_numpy(np.stack(action_batch)).type(torch.float32)
-                    next_state_batch = torch.from_numpy(np.stack(next_state_batch)).type(torch.float32)
-                    reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32)
+                    states_batch = torch.from_numpy(np.stack(states_batch)).type(torch.float32)  # (B, L, ds)
+                    actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32)  # (B, L, da)
+                    next_states_batch = torch.from_numpy(np.stack(next_states_batch)).type(torch.float32)  # (B, L, ds)
+                    rewards_batch = torch.from_numpy(np.stack(rewards_batch)).type(torch.float32)  # (B, L)
+
+                    state_batch = states_batch[:, 0, :]
+                    action_batch = actions_batch[:, 0, :]
+                    next_state_batch = next_states_batch[:, 0, :]
+                    reward_batch = rewards_batch[:, 0]
+
+                    # Policy Evaluation
+                    q_loss = self.__critic_update_td(
+                        state_batch=state_batch,
+                        action_batch=action_batch,
+                        next_state_batch=next_state_batch,
+                        reward_batch=reward_batch
+                    )
+                    mean_q_loss.append(q_loss)
 
                     # sample M additional action for each state
                     target_μ, target_A = self.target_actor.forward(state_batch)
@@ -232,14 +247,6 @@ class MPO(object):
                     additional_action = torch.stack(additional_action).squeeze()  # (M, B)
                     additional_target_q = np.array(additional_target_q).squeeze()  # (M, B)
 
-                    # Update Q-function
-                    q_loss = self.__critic_update_td(
-                        state_batch=state_batch,
-                        action_batch=action_batch,
-                        next_state_batch=next_state_batch,
-                        reward_batch=reward_batch
-                    )
-                    mean_q_loss.append(q_loss)
 
                     # E-step
                     # Update Dual-function
