@@ -8,6 +8,7 @@ def main():
     env = gym.make(args.env)
     model = MPO(
         env,
+        policy_evaluation=args.policy_evaluation,
         dual_constraint=args.eps,
         kl_constraint=0.1,
         discount_factor=args.gamma,
@@ -15,6 +16,8 @@ def main():
         sample_episode_num=args.sample_episode_num,
         sample_episode_maxlen=args.sample_episode_maxlen,
         sample_action_num=args.sample_action_num,
+        replay_length=args.replay_length,
+        replay_padding=args.replay_padding,
         rerun_num=args.rerun_num,
         mb_size=args.mb_size,
         lagrange_iteration_num=args.lagrange_iteration_num)

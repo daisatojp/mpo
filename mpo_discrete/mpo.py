@@ -57,7 +57,8 @@ class MPO(object):
                  sample_episode_num=30,
                  sample_episode_maxlen=200,
                  sample_action_num=64,
-                 backward_length=0,
+                 replay_length=0,
+                 replay_padding=False,
                  rerun_num=5,
                  mb_size=64,
                  lagrange_iteration_num=5):
@@ -76,6 +77,7 @@ class MPO(object):
         self.rerun_num = rerun_num
         self.mb_size = mb_size
         self.lagrange_iteration_num = lagrange_iteration_num
+        self.A_eye = torch.eye(env.action_space.n).to(self.gpu)
 
         self.actor = Actor(env).to(self.gpu)
         self.critic = Critic(env).to(self.gpu)
@@ -100,7 +102,7 @@ class MPO(object):
         # control/log variables
         self.iteration = 0
 
-        self.replaybuffer = ReplayBuffer(backward_length=backward_length)
+        self.replaybuffer = ReplayBuffer(replay_length=replay_length)
 
     def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
         self.replaybuffer.clear()
@@ -155,18 +157,19 @@ class MPO(object):
         return loss.item()
 
     def __update_critic_retrace(
-            self, states_batch, actions_batch, next_states_batch, rewards_batch):
+            self, states_batch, actions_batch, next_states_batch, rewards_batch, masks_batch):
         """
         :param states_batch: (B, L, ds)
-        :param actions_batch: (B, L, da)
+        :param actions_batch: (B, L,)
         :param next_states_batch: (B, L, ds)
         :param rewards_batch: (B, L)
+        :param masks_batch: (B, L)
         :return:
         """
         B = states_batch.size(0)
         L = states_batch.size(1)
         ds = states_batch.size(-1)
-        da = actions_batch.size(-1)
+        da = self.env.action_space.n
         state_batch = states_batch[:, 0, :]  # (B, ds)
         action_batch = actions_batch[:, 0, :]  # (B, da)
 
@@ -174,24 +177,29 @@ class MPO(object):
             r = rewards_batch  # (B, L)
 
             Qφ = self.target_critic.forward(
-                states_batch.reshape(-1, ds),
-                actions_batch.reshape(-1, da)
+                states_batch.reshape(-1, ds),  # (B * L, ds)
+                self.A_eye[actions_batch.flatten().long()]  # (B * L, da)
             ).reshape(B, L)  # (B, L)
 
-            π_μ_next, π_Σ_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L,)
-            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)  # (B * L,)
-            next_sampled_actions_batch = π_next.sample((A,)).transpose(0, 1).reshape(B, L, A, da)  # (B, L, A, da)
-            next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, A, -1)  # (B, L, A, ds)
-            EQφ = self.target_critic.forward(
-                next_expanded_states_batch.reshape(-1, ds),
-                next_sampled_actions_batch.reshape(-1, da)
-            ).reshape(B, L, A).mean(dim=-1)  # (B, L)
+            π_p_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L, da)
+            π_next = Categorical(probs=π_p_next)  # (B * L,)
+            π_prob = π_next.expand((da,)).log_prob(
+                torch.arange(da)[..., None].expand(da, B * L).to(self.gpu)  # (da, B * L)
+            ).transpose(0, 1).reshape(B, L, da)  # (B, L, da)
+            next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, da, -1)  # (B, L, da, ds)
+            next_expanded_actions_batch = self.A_eye[None, None, :, :].expand(B, L, da, da)  # (B, L, da, da)
+            EQφ = (
+                self.target_critic.forward(
+                    next_expanded_states_batch.reshape(-1, ds),  # (B * L * da, ds)
+                    next_expanded_actions_batch.reshape(-1, da)  # (B * L * da, da)
+                ).reshape(B, L, da) * π_prob
+            ).sum(dim=-1)  # (B, L)
 
-            π_μ, π_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
-            π = MultivariateNormal(π_μ.reshape(B, L, 1), scale_tril=π_Σ.reshape(B, L, 1, 1))  # (B, L)
-            b_μ, b_Σ = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
-            b = MultivariateNormal(b_μ.reshape(B, L, 1), scale_tril=b_Σ.reshape(B, L, 1, 1))  # (B, L)
-            c = π.log_prob(actions_batch).exp() / b.log_prob(actions_batch).exp()  # (B, L)
+            π_p = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L, da)
+            π = Categorical(probs=π_p)  # (B * L,)
+            b_p = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L, da)
+            b = Categorical(probs=b_p)  # (B * L,)
+            c = π.log_prob(actions_batch.flatten()).exp() / b.log_prob(actions_batch.flatten()).exp()  # (B * L,)
             c = torch.clamp_max(c, 1.0)  # (B, L)
             c[:, 0] = 1.0  # (B, L)
             c = torch.cumprod(c, dim=1)  # (B, L)
@@ -200,7 +208,7 @@ class MPO(object):
             γ[:, 0] = 1.0  # (B, L)
             γ = torch.cumprod(γ, dim=1)  # (B, L)
 
-            Qret = (Qφ[:, 0] + (γ * c * (r + EQφ - Qφ)).sum(dim=1))  # (B,)
+            Qret = Qφ[:, 0] + ((γ * c * (r + EQφ - Qφ)) * masks_batch).sum(dim=1)  # (B,)
 
         self.critic_optimizer.zero_grad()
         Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
@@ -244,15 +252,16 @@ class MPO(object):
             for _ in range(self.rerun_num):
                 for indices in tqdm(BatchSampler(SubsetRandomSampler(range(buff_sz)), self.mb_size, False)):
                     B = len(indices)
-                    L = self.replaybuffer.backward_length
+                    L = self.replaybuffer.replay_length
 
-                    states_batch, actions_batch, next_states_batch, rewards_batch = zip(
+                    states_batch, actions_batch, next_states_batch, rewards_batch, masks_batch = zip(
                         *[self.replaybuffer[index] for index in indices])
 
                     states_batch = torch.from_numpy(np.stack(states_batch)).type(torch.float32).to(self.gpu)  # (B, L, ds)
                     actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32).to(self.gpu)  # (B, L)
                     next_states_batch = torch.from_numpy(np.stack(next_states_batch)).type(torch.float32).to(self.gpu)  # (B, L, ds)
                     rewards_batch = torch.from_numpy(np.stack(rewards_batch)).type(torch.float32).to(self.gpu)  # (B, L)
+                    masks_batch = torch.from_numpy(np.stack(masks_batch)).type(torch.bool).to(self.gpu)  # (B, L)
 
                     state_batch = states_batch[:, 0, :]  # (B, ds)
                     action_batch = actions_batch[:, 0]  # (B,)
@@ -276,7 +285,8 @@ class MPO(object):
                             states_batch=states_batch,
                             actions_batch=actions_batch,
                             next_states_batch=next_states_batch,
-                            rewards_batch=rewards_batch
+                            rewards_batch=rewards_batch,
+                            masks_batch=masks_batch
                         )
                     if q_loss is None:
                         raise RuntimeError('invalid policy evaluation')
