@@ -1,8 +1,10 @@
+import os
 import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
 import torch
 import torch.nn as nn
+from torch.nn.utils import clip_grad_norm_
 from torch.distributions import MultivariateNormal
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from tensorboardX import SummaryWriter
@@ -67,7 +69,9 @@ class MPO(object):
     :param save: (boolean) saves the model if True
     :param save_path: (str) path for saving and loading a model
     """
-    def __init__(self, env,
+    def __init__(self,
+                 env,
+                 policy_evaluation='td',
                  dual_constraint=0.1,
                  mean_constraint=0.1,
                  var_constraint=1e-4,
@@ -76,12 +80,14 @@ class MPO(object):
                  sample_episode_num=30,
                  sample_episode_maxlen=200,
                  sample_action_num=64,
+                 backward_length=0,
                  rerun_num=5,
                  mb_size=64,
                  lagrange_iteration_num=5):
         self.gpu = 0
         self.env = env
 
+        self.policy_evaluation = policy_evaluation
         self.ε = dual_constraint  # hard constraint for the KL
         self.ε_μ = mean_constraint  # hard constraint for the KL
         self.ε_Σ = var_constraint  # hard constraint for the KL
@@ -121,7 +127,7 @@ class MPO(object):
         # control/log variables
         self.iteration = 0
 
-        self.replaybuffer = ReplayBuffer(backward_length=0)
+        self.replaybuffer = ReplayBuffer(backward_length=backward_length)
 
     def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
         self.replaybuffer.clear()
@@ -141,7 +147,7 @@ class MPO(object):
                     state = next_state
             self.replaybuffer.done_episode()
 
-    def __critic_update_td(self, state_batch, action_batch, next_state_batch, reward_batch, A=64):
+    def __update_critic_td(self, state_batch, action_batch, next_state_batch, reward_batch, A=64):
         """
         :param state_batch: (B, ds)
         :param action_batch: (B, da)
@@ -196,7 +202,7 @@ class MPO(object):
             ).reshape(B, L)  # (B, L)
 
             π_μ_next, π_Σ_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L,)
-            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)
+            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)  # (B * L,)
             next_sampled_actions_batch = π_next.sample((A,)).transpose(0, 1).reshape(B, L, A, da)  # (B, L, A, da)
             next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, A, -1)  # (B, L, A, ds)
             EQφ = self.target_critic.forward(
@@ -206,14 +212,14 @@ class MPO(object):
 
             π_μ, π_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
             π = MultivariateNormal(π_μ.reshape(B, L, 1), scale_tril=π_Σ.reshape(B, L, 1, 1))  # (B, L)
-            b_μ, b_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
+            b_μ, b_Σ = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
             b = MultivariateNormal(b_μ.reshape(B, L, 1), scale_tril=b_Σ.reshape(B, L, 1, 1))  # (B, L)
             c = π.log_prob(actions_batch).exp() / b.log_prob(actions_batch).exp()  # (B, L)
             c = torch.clamp_max(c, 1.0)  # (B, L)
             c[:, 0] = 1.0  # (B, L)
             c = torch.cumprod(c, dim=1)  # (B, L)
 
-            γ = torch.ones(size=(B, L), dtype=torch.float32) * self.γ  # (B, L)
+            γ = torch.ones(size=(B, L), dtype=torch.float32).to(self.gpu) * self.γ  # (B, L)
             γ[:, 0] = 1.0  # (B, L)
             γ = torch.cumprod(γ, dim=1)  # (B, L)
 
@@ -221,8 +227,9 @@ class MPO(object):
 
         self.critic_optimizer.zero_grad()
         Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
-        loss = self.mse_loss(Qθ, Qret)
+        loss = torch.sqrt(self.mse_loss(Qθ, Qret))
         loss.backward()
+        clip_grad_norm_(self.critic.parameters(), 0.1)
         self.critic_optimizer.step()
         return loss.item()
 
@@ -237,19 +244,14 @@ class MPO(object):
         for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
             target_param.data.copy_(param.data)
 
-    def train(self, iteration_num=100, save_path='model.pt', log=False, log_dir=None, render=False):
+    def train(self, iteration_num=100, log_dir='log', render=False):
         """
-        train a model based on MPO
-        :param iteration_num: (int)
-        :param log: (bool)
+        :param iteration_num:
         :param log_dir:
-        :param save_path
+        :param render:
         """
 
-        if log:
-            writer = SummaryWriter(log_dir)
-        else:
-            writer = None
+        writer = SummaryWriter(os.path.join(log_dir, 'tf'))
 
         for it in range(self.iteration, iteration_num):
             self.__sample_trajectory(
@@ -284,19 +286,25 @@ class MPO(object):
                     da = action_batch.size(-1)
 
                     # Policy Evaluation
-                    q_loss = self.__critic_update_td(
-                        state_batch=state_batch,
-                        action_batch=action_batch,
-                        next_state_batch=next_state_batch,
-                        reward_batch=reward_batch,
-                        A=self.sample_action_num
-                    )
-                    # q_loss = self.__update_critic_retrace(
-                    #     states_batch=states_batch,
-                    #     actions_batch=actions_batch,
-                    #     next_states_batch=next_states_batch,
-                    #     rewards_batch=rewards_batch
-                    # )
+                    q_loss = None
+                    if self.policy_evaluation == 'td':
+                        q_loss = self.__update_critic_td(
+                            state_batch=state_batch,
+                            action_batch=action_batch,
+                            next_state_batch=next_state_batch,
+                            reward_batch=reward_batch,
+                            A=self.sample_action_num
+                        )
+                    if self.policy_evaluation == 'retrace':
+                        q_loss = self.__update_critic_retrace(
+                            states_batch=states_batch,
+                            actions_batch=actions_batch,
+                            next_states_batch=next_states_batch,
+                            rewards_batch=rewards_batch,
+                            A=self.sample_action_num
+                        )
+                    if q_loss is None:
+                        raise RuntimeError('invalid policy evaluation')
                     mean_q_loss.append(q_loss)
 
                     # sample M additional action for each state
@@ -356,6 +364,7 @@ class MPO(object):
                         )
                         mean_lagrange.append(loss_policy.item())
                         loss_policy.backward()
+                        clip_grad_norm_(self.actor.parameters(), 0.1)
                         self.actor_optimizer.step()
 
             self._update_param()
@@ -363,23 +372,20 @@ class MPO(object):
             mean_q_loss = np.mean(mean_q_loss)
             mean_lagrange = np.mean(mean_lagrange)
 
-            print(
-                "\n Iteration:\t", it + 1,
-                "\n Mean reward:\t", mean_reward,
-                "\n Mean Q loss:\t", mean_q_loss,
-                "\n Mean Lagrange:\t", mean_lagrange,
-                "\n η:\t", self.η,
-                "\n η_μ:\t", self.η_μ,
-                "\n η_Σ:\t", self.η_Σ,
-            )
+            print('Iteration :', it + 1)
+            print('  Mean reward : ', mean_reward)
+            print('  Mean Q loss : ', mean_q_loss)
+            print('  Mean Lagrange : ', mean_lagrange)
+            print('  η : ', self.η)
+            print('  η_μ : ', self.η_μ)
+            print('  η_Σ : ', self.η_Σ)
 
             # saving and logging
-            self.save_model(save_path)
-            if writer is not None:
-                writer.add_scalar('reward', mean_reward, it + 1)
-                writer.add_scalar('lagrange', mean_lagrange, it + 1)
-                writer.add_scalar('qloss', mean_q_loss, it + 1)
-                writer.flush()
+            self.save_model(os.path.join(log_dir, 'mpo_model.pt'))
+            writer.add_scalar('reward', mean_reward, it + 1)
+            writer.add_scalar('lagrange', mean_lagrange, it + 1)
+            writer.add_scalar('qloss', mean_q_loss, it + 1)
+            writer.flush()
 
         # end training
         if writer is not None:
@@ -436,11 +442,11 @@ class MPO(object):
         """
         data = {
             'iteration': self.iteration,
-            'critic_state_dict': self.critic.state_dict(),
-            'target_critic_state_dict': self.target_critic.state_dict(),
             'actor_state_dict': self.actor.state_dict(),
             'target_actor_state_dict': self.target_actor.state_dict(),
-            'critic_optim_state_dict': self.critic_optimizer.state_dict(),
-            'actor_optim_state_dict': self.actor_optimizer.state_dict()
+            'critic_state_dict': self.critic.state_dict(),
+            'target_critic_state_dict': self.target_critic.state_dict(),
+            'actor_optim_state_dict': self.actor_optimizer.state_dict(),
+            'critic_optim_state_dict': self.critic_optimizer.state_dict()
         }
         torch.save(data, path)

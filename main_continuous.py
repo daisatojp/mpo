@@ -35,13 +35,14 @@ def _parse():
     # train params - general
     _add_bool_arg(parser, 'train', default=True)
     _add_bool_arg(parser, 'render', default=False)
-    _add_bool_arg(parser, 'save', default=True)
-    _add_bool_arg(parser, 'log', default=False)
     parser.add_argument(
         '--log_dir', type=str, default=None,
-        help='name of the log file')
+        help='log directory')
 
     # train parameters
+    parser.add_argument(
+        '--policy_evaluation', type=str, default='td',
+        help='policy evalution method')
     parser.add_argument(
         '--eps', type=float, default=0.1,
         help='hard constraint of the E-step')
@@ -66,6 +67,9 @@ def _parse():
     parser.add_argument(
         '--sample_action_num', type=int, default=64,
         help='number of sampled actions')
+    parser.add_argument(
+        '--backward_length', type=int, default=0,
+        help='trajectory backward length')
     parser.add_argument(
         '--rerun_num', type=int, default=5,
         help='number of reruns of the mini batch')
@@ -117,8 +121,6 @@ def main():
     if model_args['train']:
         model.train(
             iteration_num=model_args['iteration_num'],
-            save_path=model_args['save_path'],
-            log=model_args['log'],
             log_dir=model_args['log_dir'],
             render=model_args['render'])
     if model_args['eval']:
