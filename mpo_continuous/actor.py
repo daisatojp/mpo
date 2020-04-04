@@ -20,7 +20,7 @@ class Actor(nn.Module):
         self.lin2 = nn.Linear(layer1, layer2)
         self.mean_layer = nn.Linear(layer2, self.action_shape)
         self.cholesky_layer = nn.Linear(layer2, self.action_shape)
-        self.cholesky = torch.zeros(self.action_shape, self.action_shape)
+        self.action_shape_eye = torch.eye(self.action_shape)
 
     def forward(self, states):
         """
@@ -28,11 +28,19 @@ class Actor(nn.Module):
         :param states: ([State]) a (batch of) state(s) of the environment
         :return: ([float])([float]) mean and cholesky factorization chosen by policy at given state
         """
+        B = states.size(0)
+
+        device = self.lin1.weight.device
+        if self.action_range.device != device:
+            self.action_range = self.action_range.to(device)
+        if self.action_shape_eye.device != device:
+            self.action_shape_eye = self.action_shape_eye.to(device)
+
         x = F.relu(self.lin1(states))
         x = F.relu(self.lin2(x))
         mean = self.action_range * torch.tanh(self.mean_layer(x))
         cholesky_vector = F.softplus(self.cholesky_layer(x))
-        cholesky = torch.eye(self.action_shape)[None, ...].repeat(cholesky_vector.size(0), 1, 1) @ cholesky_vector[..., None]
+        cholesky = self.action_shape_eye[None, ...].repeat(B, 1, 1) @ cholesky_vector[..., None]
         return mean, cholesky
 
     def action(self, state):
@@ -42,10 +50,10 @@ class Actor(nn.Module):
         :return: (float) an action of the action space
         """
         with torch.no_grad():
-            mean, cholesky = self.forward(state)
+            mean, cholesky = self.forward(state[None, ...])
             action_distribution = MultivariateNormal(mean, scale_tril=cholesky)
             action = action_distribution.sample()
-        return action
+        return action[0]
 
     def eval_step(self, state):
         """
