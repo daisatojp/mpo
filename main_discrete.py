@@ -1,5 +1,5 @@
 import gym
-from mpo_continuous import MPO
+from mpo_discrete import MPO
 from argparser import parse
 
 
@@ -9,8 +9,7 @@ def main():
     model = MPO(
         env,
         dual_constraint=args.eps,
-        mean_constraint=args.eps_mean,
-        var_constraint=args.eps_sigma,
+        kl_constraint=0.1,
         discount_factor=args.gamma,
         alpha=args.alpha,
         sample_episode_num=args.sample_episode_num,
