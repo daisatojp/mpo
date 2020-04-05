@@ -18,11 +18,15 @@ class ReplayBuffer:
 
     def done_episode(self):
         states, actions, next_states, rewards = zip(*self.tmp_episode_buff)
+        states = list(states)
+        actions = list(actions)
+        next_states = list(next_states)
+        rewards = list(rewards)
         episode_len = len(states)
         if self.enable_padding:
             usable_episode_len = episode_len
         else:
-            usable_episode_len = episode_len - self.replay_length - 1
+            usable_episode_len = episode_len - (self.replay_length - 1)
         self.start_idx_of_episode.append(len(self.idx_to_episode_idx))
         self.idx_to_episode_idx.extend([len(self.episodes)] * usable_episode_len)
         self.episodes.append((states, actions, next_states, rewards))

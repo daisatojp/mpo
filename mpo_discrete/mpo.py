@@ -102,7 +102,7 @@ class MPO(object):
         # control/log variables
         self.iteration = 0
 
-        self.replaybuffer = ReplayBuffer(replay_length=replay_length)
+        self.replaybuffer = ReplayBuffer(replay_length=replay_length, enable_padding=replay_padding)
 
     def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
         self.replaybuffer.clear()
@@ -171,7 +171,7 @@ class MPO(object):
         ds = states_batch.size(-1)
         da = self.env.action_space.n
         state_batch = states_batch[:, 0, :]  # (B, ds)
-        action_batch = actions_batch[:, 0, :]  # (B, da)
+        action_batch = actions_batch[:, 0]  # (B,)
 
         with torch.no_grad():
             r = rewards_batch  # (B, L)
@@ -183,9 +183,9 @@ class MPO(object):
 
             π_p_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L, da)
             π_next = Categorical(probs=π_p_next)  # (B * L,)
-            π_prob = π_next.expand((da,)).log_prob(
+            π_prob = π_next.expand((da, B * L)).log_prob(
                 torch.arange(da)[..., None].expand(da, B * L).to(self.gpu)  # (da, B * L)
-            ).transpose(0, 1).reshape(B, L, da)  # (B, L, da)
+            ).exp().transpose(0, 1).reshape(B, L, da)  # (B, L, da)
             next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, da, -1)  # (B, L, da, ds)
             next_expanded_actions_batch = self.A_eye[None, None, :, :].expand(B, L, da, da)  # (B, L, da, da)
             EQφ = (
@@ -200,7 +200,7 @@ class MPO(object):
             b_p = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L, da)
             b = Categorical(probs=b_p)  # (B * L,)
             c = π.log_prob(actions_batch.flatten()).exp() / b.log_prob(actions_batch.flatten()).exp()  # (B * L,)
-            c = torch.clamp_max(c, 1.0)  # (B, L)
+            c = torch.clamp_max(c, 1.0).reshape(B, L)  # (B, L)
             c[:, 0] = 1.0  # (B, L)
             c = torch.cumprod(c, dim=1)  # (B, L)
 
@@ -211,10 +211,9 @@ class MPO(object):
             Qret = Qφ[:, 0] + ((γ * c * (r + EQφ - Qφ)) * masks_batch).sum(dim=1)  # (B,)
 
         self.critic_optimizer.zero_grad()
-        Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
-        loss = torch.sqrt(self.mse_loss(Qθ, Qret))
+        Qθ = self.critic.forward(state_batch, self.A_eye[action_batch.long()]).squeeze(-1)  # (B,)
+        loss = self.mse_loss(Qθ, Qret)
         loss.backward()
-        clip_grad_norm_(self.critic.parameters(), 0.1)
         self.critic_optimizer.step()
         return loss.item()
 
@@ -272,7 +271,7 @@ class MPO(object):
                     da = self.env.action_space.n
 
                     # Policy Evaluation
-                    q_loss = None
+                    q_loss = 0.0
                     if self.policy_evaluation == 'td':
                         q_loss = self.__update_critic_td(
                             state_batch=state_batch,
