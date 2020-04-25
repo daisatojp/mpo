@@ -18,37 +18,27 @@ def parse():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description='Implementation of MPO on gym environments')
-
+    parser.add_argument(
+        '--device', type=str, default='cpu',
+        help='device')
     parser.add_argument(
         '--env', type=str, default='Pendulum-v0',
         help='gym environment')
     parser.add_argument(
-        '--load', type=str, default=None,
-        help='loading path if given')
-
-    # train params - general
-    add_bool_arg(parser, 'train', default=True)
-    add_bool_arg(parser, 'render', default=False)
-    parser.add_argument(
-        '--log_dir', type=str, default=None,
-        help='log directory')
-
-    # train parameters
-    parser.add_argument(
         '--policy_evaluation', type=str, default='td',
         help='policy evalution method')
     parser.add_argument(
-        '--eps', type=float, default=0.1,
+        '--dual_constraint', type=float, default=0.1,
         help='hard constraint of the E-step')
     parser.add_argument(
-        '--eps_mean', type=float, default=0.1,
-        help='hard constraint on C_mu')
+        '--kl_mean_constraint', type=float, default=0.1,
+        help='hard constraint on mean parameter')
     parser.add_argument(
-        '--eps_sigma', type=float, default=1e-4,
-        help='hard constraint on C_Sigma')
+        '--kl_var_constraint', type=float, default=1e-4,
+        help='hard constraint on variance parameter')
     parser.add_argument(
-        '--gamma', type=float, default=0.99,
-        help='learning rate')
+        '--discount_factor', type=float, default=0.99,
+        help='discount factor')
     parser.add_argument(
         '--alpha', type=float, default=10,
         help='scaling factor of the lagrangian multiplier in the M-step')
@@ -66,11 +56,10 @@ def parse():
         help='replay length')
     add_bool_arg(parser, 'replay_padding', False)
     parser.add_argument(
-        '--rerun_num', type=int, default=5,
-        help='number of reruns of the mini batch')
+        '--episode_rerun_num', type=int, default=5,
+        help='number of reruns of sampled episode')
     parser.add_argument(
-        '--mb_size', type=int, default=64,
-        help='size of the mini batch')
+        '--batch_size', type=int, default=64)
     parser.add_argument(
         '--lagrange_iteration_num', type=int, default=5,
         help='number of optimization steps of the Lagrangian')
@@ -78,16 +67,11 @@ def parse():
         '--iteration_num', type=int, default=1000,
         help='number of iteration to learn')
     parser.add_argument(
-        '--save_path', type=str, default='mpo_model.pt',
-        help='saving path if save flag is set')
-
-    # eval params (default at false)
-    add_bool_arg(parser, 'eval', default=False)
+        '--log_dir', type=str, default=None,
+        help='log directory')
+    add_bool_arg(parser, 'render', default=False)
     parser.add_argument(
-        '--eval_episodes', type=int, default=100,
-        help='number of episodes for evaluation')
-    parser.add_argument(
-        '--eval_ep_length', type=int, default=3000,
-        help='length of an evaluation episode')
+        '--load', type=str, default=None,
+        help='loading path if given')
 
     return parser.parse_args()

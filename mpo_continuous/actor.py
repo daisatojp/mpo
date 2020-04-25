@@ -11,43 +11,45 @@ class Actor(nn.Module):
     :param layer1: (int) size of the first hidden layer (default = 100)
     :param layer2: (int) size of the first hidden layer (default = 100)
     """
-    def __init__(self, env, layer1=100, layer2=100):
+    def __init__(self, env):
         super(Actor, self).__init__()
-        self.state_shape = env.observation_space.shape[0]
-        self.action_shape = env.action_space.shape[0]
-        self.action_range = torch.from_numpy(env.action_space.high)
-        self.lin1 = nn.Linear(self.state_shape, layer1)
-        self.lin2 = nn.Linear(layer1, layer2)
-        self.mean_layer = nn.Linear(layer2, self.action_shape)
-        self.cholesky_layer = nn.Linear(layer2, self.action_shape)
-        self.action_shape_eye = torch.eye(self.action_shape)
+        self.env = env
+        self.ds = env.observation_space.shape[0]
+        self.da = env.action_space.shape[0]
+        self.lin1 = nn.Linear(self.ds, 128)
+        self.lin2 = nn.Linear(128, 128)
+        self.mean_layer = nn.Linear(128, self.da)
+        self.cholesky_layer = nn.Linear(128, (self.da * (self.da + 1)) // 2)
 
-    def forward(self, states):
+    def forward(self, state):
         """
         forwards input through the network
-        :param states: ([State]) a (batch of) state(s) of the environment
-        :return: ([float])([float]) mean and cholesky factorization chosen by policy at given state
+        :param state: (B, ds)
+        :return: mean vector (B, da) and cholesky factorization of covariance matrix (B, da, da)
         """
-        B = states.size(0)
-
-        device = self.lin1.weight.device
-        if self.action_range.device != device:
-            self.action_range = self.action_range.to(device)
-        if self.action_shape_eye.device != device:
-            self.action_shape_eye = self.action_shape_eye.to(device)
-
-        x = F.relu(self.lin1(states))
+        device = state.device
+        B = state.size(0)
+        ds = self.ds
+        da = self.da
+        action_low = torch.from_numpy(self.env.action_space.low)[None, ...].to(device)  # (1, da)
+        action_high = torch.from_numpy(self.env.action_space.high)[None, ...].to(device)  # (1, da)
+        x = F.relu(self.lin1(state))
         x = F.relu(self.lin2(x))
-        mean = self.action_range * torch.tanh(self.mean_layer(x))
-        cholesky_vector = F.softplus(self.cholesky_layer(x))
-        cholesky = self.action_shape_eye[None, ...].repeat(B, 1, 1) @ cholesky_vector[..., None]
+        mean = torch.sigmoid(self.mean_layer(x))  # (B, da)
+        mean = action_low + (action_high - action_low) * mean
+        cholesky_vector = self.cholesky_layer(x)  # (B, (da*(da+1))//2)
+        cholesky_diag_index = torch.arange(da, dtype=torch.long) + 1
+        cholesky_diag_index = (cholesky_diag_index * (cholesky_diag_index + 1)) // 2 - 1
+        cholesky_vector[:, cholesky_diag_index] = F.softplus(cholesky_vector[:, cholesky_diag_index])
+        tril_indices = torch.tril_indices(row=da, col=da, offset=0)
+        cholesky = torch.zeros(size=(B, da, da), dtype=torch.float32).to(device)
+        cholesky[:, tril_indices[0], tril_indices[1]] = cholesky_vector
         return mean, cholesky
 
     def action(self, state):
         """
-        approximates an action by going forward through the network
-        :param state: (State) a state of the environment
-        :return: (float) an action of the action space
+        :param state: (ds,)
+        :return: an action
         """
         with torch.no_grad():
             mean, cholesky = self.forward(state[None, ...])

@@ -44,4 +44,8 @@ class ReplayBuffer:
 
     def mean_reward(self):
         _, _, _, rewards = zip(*self.episodes)
-        return np.mean(rewards)
+        return np.mean([np.mean(reward) for reward in rewards])
+
+    def mean_return(self):
+        _, _, _, rewards = zip(*self.episodes)
+        return np.mean([np.sum(reward) for reward in rewards])

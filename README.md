@@ -10,13 +10,31 @@ Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym
 ### Continuous Action Space
 
 ```bash
-python3 main_continuous.py --env Pendulum-v0 --policy_evaluation td --gamma 0.99 --iteration_num 500 --sample_episode_num 50 --replay_length 1 --mb_size 64 --log_dir log_Pendulum-v0_td --render
+python3 main_continuous.py
+  --env Pendulum-v0
+  --policy_evaluation td
+  --gamma 0.99
+  --iteration_num 500
+  --sample_episode_num 50
+  --replay_length 1
+  --mb_size 64
+  --log_dir log_Pendulum-v0_td
+  --render
 ```
 
 ### Discrete Action Space
 
 ```bash
-python3 main_discrete.py --env LunarLander-v2 --policy_evaluation td --gamma 0.99 --iteration_num 500 --sample_episode_num 100 --replay_length 1 --mb_size 128 --log_dir log_lunarlander-v2_td --render
+python3 main_discrete.py
+  --env LunarLander-v2
+  --policy_evaluation td
+  --gamma 0.99
+  --iteration_num 500
+  --sample_episode_num 100
+  --replay_length 1
+  --mb_size 128
+  --log_dir log_lunarlander-v2_td
+  --render
 ```
 
 ## Support
