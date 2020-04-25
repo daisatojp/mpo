@@ -1,5 +1,5 @@
 import gym
-from mpo_continuous import MPO
+from mpo import MPO
 from argparser import parse
 
 
@@ -12,6 +12,7 @@ def main():
         dual_constraint=args.dual_constraint,
         kl_mean_constraint=args.kl_mean_constraint,
         kl_var_constraint=args.kl_var_constraint,
+        kl_constraint=args.kl_constraint,
         discount_factor=args.discount_factor,
         alpha=args.alpha,
         sample_episode_num=args.sample_episode_num,

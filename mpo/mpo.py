@@ -5,13 +5,13 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
-from torch.distributions import MultivariateNormal
+from torch.distributions import MultivariateNormal, Categorical
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from tensorboardX import SummaryWriter
 import gym
-from mpo_continuous.actor import Actor
-from mpo_continuous.critic import Critic
-from mpo_continuous.replaybuffer import ReplayBuffer
+from mpo.actor import ActorContinuous, ActorDiscrete
+from mpo.critic import CriticContinuous, CriticDiscrete
+from mpo.replaybuffer import ReplayBuffer
 
 
 def bt(m):
@@ -45,10 +45,20 @@ def gaussian_kl(mean1, mean2, cholesky1, cholesky2):
     return C_μ, C_Σ
 
 
+def categorical_kl(p1, p2):
+    """
+    calculates KL between two Categorical distributions
+    :param p1: (B, D)
+    :param p2: (B, D)
+    """
+    p1 = torch.clamp_min(p1, 0.0001)
+    p2 = torch.clamp_min(p2, 0.0001)
+    return torch.mean((p1 * torch.log(p1 / p2)).sum(dim=-1))
+
+
 class MPO(object):
     """
     Maximum A Posteriori Policy Optimization (MPO)
-
     :param env: (Gym Environment) gym environment to learn on
     :param dual_constraint: (float) hard constraint of the dual formulation in the E-step
     :param mean_constraint: (float) hard constraint of the mean in the M-step
@@ -74,8 +84,9 @@ class MPO(object):
                  env,
                  policy_evaluation='td',
                  dual_constraint=0.1,
-                 kl_mean_constraint=0.1,
-                 kl_var_constraint=1e-4,
+                 kl_mean_constraint=0.01,
+                 kl_var_constraint=0.01,
+                 kl_constraint=0.01,
                  discount_factor=0.99,
                  alpha=10,
                  sample_episode_num=30,
@@ -87,16 +98,23 @@ class MPO(object):
                  lagrange_iteration_num=5):
         self.device = device
         self.env = env
+        if self.env.action_space.dtype == np.float32:
+            self.continuous_action_space = True
+        else:
+            self.continuous_action_space = False
         self.ds = env.observation_space.shape[0]
-        self.da = env.action_space.shape[0]
+        if self.continuous_action_space:
+            self.da = env.action_space.shape[0]
+        else:
+            self.da = env.action_space.n
 
         self.policy_evaluation = policy_evaluation
         self.ε_dual = dual_constraint
         self.ε_kl_μ = kl_mean_constraint  # hard constraint for the KL
         self.ε_kl_Σ = kl_var_constraint  # hard constraint for the KL
+        self.ε_kl = kl_constraint
         self.γ = discount_factor
         self.α = alpha  # scaling factor for the update step of η_μ
-
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxlen = sample_episode_maxlen
         self.sample_action_num = sample_action_num
@@ -104,10 +122,19 @@ class MPO(object):
         self.batch_size = batch_size
         self.lagrange_iteration_num = lagrange_iteration_num
 
-        self.actor = Actor(env).to(self.device)
-        self.critic = Critic(env).to(self.device)
-        self.target_actor = Actor(env).to(self.device)
-        self.target_critic = Critic(env).to(self.device)
+        if not self.continuous_action_space:
+            self.A_eye = torch.eye(self.da).to(self.device)
+
+        if self.continuous_action_space:
+            self.actor = ActorContinuous(env).to(self.device)
+            self.critic = CriticContinuous(env).to(self.device)
+            self.target_actor = ActorContinuous(env).to(self.device)
+            self.target_critic = CriticContinuous(env).to(self.device)
+        else:
+            self.actor = ActorDiscrete(env).to(self.device)
+            self.critic = CriticDiscrete(env).to(self.device)
+            self.target_actor = ActorDiscrete(env).to(self.device)
+            self.target_critic = CriticDiscrete(env).to(self.device)
 
         for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
             target_param.data.copy_(param.data)
@@ -124,6 +151,7 @@ class MPO(object):
         self.η = np.random.rand()
         self.η_kl_μ = np.random.rand()
         self.η_kl_Σ = np.random.rand()
+        self.η_kl = np.random.rand()
 
         # control/log variables
         self.iteration = 0
@@ -137,7 +165,7 @@ class MPO(object):
             for steps in range(sample_episode_maxlen):
                 action = self.target_actor.action(
                     torch.from_numpy(state).type(torch.float32).to(self.device)
-                ).cpu().numpy().flatten()
+                ).cpu().numpy()
                 next_state, reward, done, _ = self.env.step(action)
                 if render and i == 0:
                     self.env.render()
@@ -148,10 +176,15 @@ class MPO(object):
                     state = next_state
             self.replaybuffer.done_episode()
 
-    def __update_critic_td(self, state_batch, action_batch, next_state_batch, reward_batch, sample_num=64):
+    def __update_critic_td(self,
+                           state_batch,
+                           action_batch,
+                           next_state_batch,
+                           reward_batch,
+                           sample_num=64):
         """
         :param state_batch: (B, ds)
-        :param action_batch: (B, da)
+        :param action_batch: (B, da) or (B,)
         :param next_state_batch: (B, ds)
         :param reward_batch: (B,)
         :param sample_num:
@@ -162,17 +195,41 @@ class MPO(object):
         da = self.da
         with torch.no_grad():
             r = reward_batch  # (B,)
-            π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
-            π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
-            sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
-            expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
-            next_q = self.target_critic.forward(
-                expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
-                sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
-            ).reshape(B, sample_num).mean(dim=1)  # (B,)
-            y = r + self.γ * next_q
+            if self.continuous_action_space:
+                π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
+                π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
+                sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
+                expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
+                expected_next_q = self.target_critic.forward(
+                    expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
+                    sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
+                ).reshape(B, sample_num).mean(dim=1)  # (B,)
+            else:
+                π_p = self.target_actor.forward(next_state_batch)  # (B, da)
+                π = Categorical(probs=π_p)  # (B,)
+                π_prob = π.expand((da, B)).log_prob(
+                    torch.arange(da)[..., None].expand(-1, B).to(self.device)  # (da, B)
+                ).exp().transpose(0, 1)  # (B, da)
+                sampled_next_actions = self.A_eye[None, ...].expand(B, -1, -1)  # (B, da, da)
+                expanded_next_states = next_state_batch[:, None, :].expand(-1, da, -1)  # (B, da, ds)
+                expected_next_q = (
+                    self.target_critic.forward(
+                        expanded_next_states.reshape(-1, ds),  # (B * da, ds)
+                        sampled_next_actions.reshape(-1, da)  # (B * da, da)
+                    ).reshape(B, da) * π_prob  # (B, da)
+                ).sum(dim=-1)  # (B,)
+            y = r + self.γ * expected_next_q
         self.critic_optimizer.zero_grad()
-        t = self.critic(state_batch, action_batch).squeeze()
+        if self.continuous_action_space:
+            t = self.critic(
+                state_batch,
+                action_batch
+            ).squeeze()
+        else:
+            t = self.critic(
+                state_batch,
+                self.A_eye[action_batch.long()]
+            ).squeeze(-1)  # (B,)
         loss = self.norm_loss_q(y, t)
         loss.backward()
         self.critic_optimizer.step()
@@ -282,12 +339,15 @@ class MPO(object):
                         *[self.replaybuffer[index] for index in indices])
 
                     states_batch = torch.from_numpy(np.stack(states_batch)).type(torch.float32).to(self.device)  # (B, L, ds)
-                    actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32).to(self.device)  # (B, L, da)
+                    actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32).to(self.device)  # (B, L, da) or (B, L)
                     next_states_batch = torch.from_numpy(np.stack(next_states_batch)).type(torch.float32).to(self.device)  # (B, L, ds)
                     rewards_batch = torch.from_numpy(np.stack(rewards_batch)).type(torch.float32).to(self.device)  # (B, L)
 
                     state_batch = states_batch[:, 0, :]  # (B, ds)
-                    action_batch = actions_batch[:, 0, :]  # (B, da)
+                    if self.continuous_action_space:
+                        action_batch = actions_batch[:, 0, :]  # (B, da)
+                    else:
+                        action_batch = actions_batch[:, 0]  # (B,)
                     next_state_batch = next_states_batch[:, 0, :]  # (B, ds)
                     reward_batch = rewards_batch[:, 0]  # (B,)
 
@@ -315,15 +375,31 @@ class MPO(object):
 
                     # sample M additional action for each state
                     with torch.no_grad():
-                        b_μ, b_A = self.target_actor.forward(state_batch)  # (B,)
-                        b = MultivariateNormal(b_μ, scale_tril=b_A)  # (B,)
-                        sampled_actions = b.sample((M,))  # (M, B, da)
-                        expanded_states = state_batch[None, ...].expand(M, -1, -1)  # (M, B, ds)
-                        target_q = self.target_critic.forward(
-                            expanded_states.reshape(-1, ds),  # (M * B, ds)
-                            sampled_actions.reshape(-1, da)  # (M * B, da)
-                        ).reshape(M, B)  # (M, B)
-                        target_q_np = target_q.cpu().numpy()  # (M, B)
+                        if self.continuous_action_space:
+                            b_μ, b_A = self.target_actor.forward(state_batch)  # (B,)
+                            b = MultivariateNormal(b_μ, scale_tril=b_A)  # (B,)
+                            sampled_actions = b.sample((M,))  # (M, B, da)
+                            expanded_states = state_batch[None, ...].expand(M, -1, -1)  # (M, B, ds)
+                            target_q = self.target_critic.forward(
+                                expanded_states.reshape(-1, ds),  # (M * B, ds)
+                                sampled_actions.reshape(-1, da)  # (M * B, da)
+                            ).reshape(M, B)  # (M, B)
+                            target_q_np = target_q.cpu().numpy()  # (M, B)
+                        else:
+                            actions = torch.arange(da)[..., None].expand(da, B).to(self.device)  # (da, B)
+                            b_p = self.target_actor.forward(state_batch)  # (B, da)
+                            b = Categorical(probs=b_p)  # (B,)
+                            b_prob = b.expand((da, B)).log_prob(actions).exp()  # (da, B)
+                            expanded_actions = self.A_eye[None, ...].expand(B, -1, -1)  # (B, da, da)
+                            expanded_states = state_batch.reshape(B, 1, ds).expand((B, da, ds))  # (B, da, ds)
+                            target_q = (
+                                self.target_critic.forward(
+                                    expanded_states.reshape(-1, ds),  # (B * da, ds)
+                                    expanded_actions.reshape(-1, da)  # (B * da, da)
+                                ).reshape(B, da)  # (B, da)
+                            ).transpose(0, 1)  # (da, B)
+                            b_prob_np = b_prob.cpu().numpy()  # (da, B)
+                            target_q_np = target_q.cpu().numpy()  # (da, B)
 
                     # E-step
                     # Update Dual-function
@@ -345,36 +421,59 @@ class MPO(object):
                     # M-step
                     # update policy based on lagrangian
                     for _ in range(self.lagrange_iteration_num):
-                        μ, A = self.actor.forward(state_batch)
-                        π = MultivariateNormal(μ, scale_tril=A)  # (B,)
-                        loss_p = torch.mean(
-                            qij * π.expand((M, B)).log_prob(sampled_actions)  # (M, B)
-                        )
-                        mean_loss_p.append((-loss_p).item())
+                        if self.continuous_action_space:
+                            μ, A = self.actor.forward(state_batch)
+                            π = MultivariateNormal(μ, scale_tril=A)  # (B,)
+                            loss_p = torch.mean(
+                                qij * π.expand((M, B)).log_prob(sampled_actions)  # (M, B)
+                            )
+                            mean_loss_p.append((-loss_p).item())
 
-                        kl_μ, kl_Σ = gaussian_kl(
-                            mean1=μ, mean2=b_μ,
-                            cholesky1=A, cholesky2=b_A)
+                            kl_μ, kl_Σ = gaussian_kl(
+                                mean1=μ, mean2=b_μ,
+                                cholesky1=A, cholesky2=b_A)
 
-                        # Update lagrange multipliers by gradient descent
-                        self.η_kl_μ -= self.α * (self.ε_kl_μ - kl_μ).detach().item()
-                        self.η_kl_Σ -= self.α * (self.ε_kl_Σ - kl_Σ).detach().item()
+                            # Update lagrange multipliers by gradient descent
+                            self.η_kl_μ -= self.α * (self.ε_kl_μ - kl_μ).detach().item()
+                            self.η_kl_Σ -= self.α * (self.ε_kl_Σ - kl_Σ).detach().item()
 
-                        if self.η_kl_μ < 0:
-                            self.η_kl_μ = 0
-                        if self.η_kl_Σ < 0:
-                            self.η_kl_Σ = 0
+                            if self.η_kl_μ < 0:
+                                self.η_kl_μ = 0
+                            if self.η_kl_Σ < 0:
+                                self.η_kl_Σ = 0
 
-                        self.actor_optimizer.zero_grad()
-                        loss_l = -(
-                                loss_p
-                                + self.η_kl_μ * (self.ε_kl_μ - kl_μ)
-                                + self.η_kl_Σ * (self.ε_kl_Σ - kl_Σ)
-                        )
-                        mean_loss_l.append(loss_l.item())
-                        loss_l.backward()
-                        clip_grad_norm_(self.actor.parameters(), 0.1)
-                        self.actor_optimizer.step()
+                            self.actor_optimizer.zero_grad()
+                            loss_l = -(
+                                    loss_p
+                                    + self.η_kl_μ * (self.ε_kl_μ - kl_μ)
+                                    + self.η_kl_Σ * (self.ε_kl_Σ - kl_Σ)
+                            )
+                            mean_loss_l.append(loss_l.item())
+                            loss_l.backward()
+                            clip_grad_norm_(self.actor.parameters(), 0.1)
+                            self.actor_optimizer.step()
+                        else:
+                            π_p = self.actor.forward(state_batch)  # (B, da)
+                            π = Categorical(probs=π_p)  # (B,)
+                            loss_p = torch.mean(
+                                qij * π.expand((da, B)).log_prob(actions)
+                            )
+                            mean_loss_p.append((-loss_p).item())
+
+                            kl = categorical_kl(p1=π_p, p2=b_p)
+
+                            # Update lagrange multipliers by gradient descent
+                            self.η_kl -= self.α * (self.ε_kl - kl).detach().item()
+
+                            if self.η_kl < 0:
+                                self.η_kl = 0
+
+                            self.actor_optimizer.zero_grad()
+                            loss_l = -(loss_p + self.η_kl * (self.ε_kl - kl))
+                            mean_loss_l.append(loss_l.item())
+                            loss_l.backward()
+                            clip_grad_norm_(self.actor.parameters(), 0.1)
+                            self.actor_optimizer.step()
 
             self._update_param()
 
@@ -390,8 +489,11 @@ class MPO(object):
             print('  mean loss_p :', mean_loss_p)
             print('  mean loss_l :', mean_loss_l)
             print('  η :', self.η)
-            print('  η_kl_μ :', self.η_kl_μ)
-            print('  η_kl_Σ :', self.η_kl_Σ)
+            if self.continuous_action_space:
+                print('  η_kl_μ :', self.η_kl_μ)
+                print('  η_kl_Σ :', self.η_kl_Σ)
+            else:
+                print('  η_kl :', self.η_kl)
 
             # saving and logging
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
@@ -403,8 +505,11 @@ class MPO(object):
             writer.add_scalar('loss_p', mean_loss_p, it)
             writer.add_scalar('loss_l', mean_loss_l, it)
             writer.add_scalar('η', self.η, it)
-            writer.add_scalar('η_kl_μ', self.η_kl_μ, it)
-            writer.add_scalar('η_kl_Σ', self.η_kl_Σ, it)
+            if self.continuous_action_space:
+                writer.add_scalar('η_kl_μ', self.η_kl_μ, it)
+                writer.add_scalar('η_kl_Σ', self.η_kl_Σ, it)
+            else:
+                writer.add_scalar('η_kl', self.η_kl, it)
             writer.flush()
 
         # end training

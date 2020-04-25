@@ -2,24 +2,23 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch
 from torch.distributions import MultivariateNormal
+from torch.distributions import Categorical
 
 
-class Actor(nn.Module):
+class ActorContinuous(nn.Module):
     """
     Policy network
-    :param env: (gym Environment) environment actor is operating on
-    :param layer1: (int) size of the first hidden layer (default = 100)
-    :param layer2: (int) size of the first hidden layer (default = 100)
+    :param env: OpenAI gym environment
     """
     def __init__(self, env):
-        super(Actor, self).__init__()
+        super(ActorContinuous, self).__init__()
         self.env = env
         self.ds = env.observation_space.shape[0]
         self.da = env.action_space.shape[0]
-        self.lin1 = nn.Linear(self.ds, 128)
-        self.lin2 = nn.Linear(128, 128)
-        self.mean_layer = nn.Linear(128, self.da)
-        self.cholesky_layer = nn.Linear(128, (self.da * (self.da + 1)) // 2)
+        self.lin1 = nn.Linear(self.ds, 256)
+        self.lin2 = nn.Linear(256, 256)
+        self.mean_layer = nn.Linear(256, self.da)
+        self.cholesky_layer = nn.Linear(256, (self.da * (self.da + 1)) // 2)
 
     def forward(self, state):
         """
@@ -57,28 +56,38 @@ class Actor(nn.Module):
             action = action_distribution.sample()
         return action[0]
 
-    def eval_step(self, state):
+
+class ActorDiscrete(nn.Module):
+    """
+    :param env: gym environment
+    """
+    def __init__(self, env):
+        super(ActorDiscrete, self).__init__()
+        self.env = env
+        self.ds = env.observation_space.shape[0]
+        self.da = env.action_space.n
+        self.lin1 = nn.Linear(self.ds, 256)
+        self.lin2 = nn.Linear(256, 256)
+        self.out = nn.Linear(256, self.da)
+
+    def forward(self, state):
         """
-        approximates an action based on the mean output of the network
-        :param state: (State) a state of  the environment
-        :return: (float) an action of the action space
+        :param state: (B, ds)
+        :return:
+        """
+        B = state.size(0)
+        h = F.relu(self.lin1(state))
+        h = F.relu(self.lin2(h))
+        h = self.out(h)
+        return torch.softmax(h, dim=-1)
+
+    def action(self, state):
+        """
+        :param state: (ds,)
+        :return: an action
         """
         with torch.no_grad():
-            action, _ = self.forward(state)
+            p = self.forward(state[None, ...])
+            action_distribution = Categorical(probs=p[0])
+            action = action_distribution.sample()
         return action
-
-    def to_cholesky_matrix(self, cholesky_vector):
-        """
-        computes cholesky matrix corresponding to a vector
-        :param cholesky_vector: ([float]) vector with n items
-        :return: ([[float]]) Square Matrix containing the entries of the
-                 vector
-        """
-        k = 0
-        cholesky = torch.zeros(self.action_shape, self.action_shape)
-        for i in range(self.action_shape):
-            for j in range(self.action_shape):
-                if i >= j:
-                    cholesky[i][j] = cholesky_vector.item() if self.action_shape == 1 else cholesky_vector[k].item()
-                    k = k + 1
-        return cholesky
