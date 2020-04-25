@@ -5,27 +5,39 @@ Implementation of the Maximum A Posteriori Policy Optimization
 [paper2](https://arxiv.org/abs/1812.02256.pdf))
 Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym) environments.
 
+## Support
+
+* Policy Evaluation
+    - [x] 1-step TD
+    - [ ] Retrace
+
 ## How to use
 
 ### Continuous Action Space
 
 ```bash
-python3 main_continuous.py
-  --env Pendulum-v0
+python3 train_continuous.py
+  --device cuda:0
+  --env LunarLanderContinuous-v2
   --policy_evaluation td
-  --gamma 0.99
+  --dual_constraint 0.1
+  --kl_mean_constraint 0.01
+  --kl_var_constraint 0.01
+  --discount_factor 0.99
   --iteration_num 500
   --sample_episode_num 50
+  --sample_episode_maxlen 500
+  --episode_rerun_num 3
   --replay_length 1
-  --mb_size 64
-  --log_dir log_Pendulum-v0_td
+  --batch_size 128
+  --log_dir log
   --render
 ```
 
 ### Discrete Action Space
 
 ```bash
-python3 main_discrete.py
+python3 train_discrete.py
   --env LunarLander-v2
   --policy_evaluation td
   --gamma 0.99
@@ -36,12 +48,6 @@ python3 main_discrete.py
   --log_dir log_lunarlander-v2_td
   --render
 ```
-
-## Support
-
-* Policy Evaluation
-    - [x] 1-step TD
-    - [ ] Retrace
 
 ## License
 
