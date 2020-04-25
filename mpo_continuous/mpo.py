@@ -118,7 +118,7 @@ class MPO(object):
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
-        self.mse_loss = nn.MSELoss()
+        self.norm_loss_q = nn.SmoothL1Loss()
 
         # initialize Lagrange Multiplier
         self.η = np.random.rand()
@@ -173,7 +173,7 @@ class MPO(object):
             y = r + self.γ * next_q
         self.critic_optimizer.zero_grad()
         t = self.critic(state_batch, action_batch).squeeze()
-        loss = self.mse_loss(y, t)
+        loss = self.norm_loss_q(y, t)
         loss.backward()
         self.critic_optimizer.step()
         return loss
