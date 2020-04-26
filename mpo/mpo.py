@@ -1,4 +1,5 @@
 import os
+from multiprocessing import Pool
 import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
@@ -89,6 +90,7 @@ class MPO(object):
                  kl_constraint=0.01,
                  discount_factor=0.99,
                  alpha=10,
+                 sample_process_num=5,
                  sample_episode_num=30,
                  sample_episode_maxlen=200,
                  sample_action_num=64,
@@ -115,6 +117,7 @@ class MPO(object):
         self.ε_kl = kl_constraint
         self.γ = discount_factor
         self.α = alpha  # scaling factor for the update step of η_μ
+        self.sample_process_num = sample_process_num
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxlen = sample_episode_maxlen
         self.sample_action_num = sample_action_num
@@ -158,23 +161,28 @@ class MPO(object):
 
         self.replaybuffer = ReplayBuffer(backward_length=backward_length)
 
+    def __sample_trajectory_worker(self):
+        buff = []
+        state = self.env.reset()
+        for steps in range(sample_episode_maxlen):
+            action = self.target_actor.action(
+                torch.from_numpy(state).type(torch.float32).to(self.device)
+            ).cpu().numpy()
+            next_state, reward, done, _ = self.env.step(action)
+            # if self.render and i == 0:
+            #     self.env.render()
+            buff.append((state, action, next_state, reward))
+            if done:
+                break
+            else:
+                state = next_state
+        return buff
+
     def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
         self.replaybuffer.clear()
-        for i in range(sample_episode_num):
-            state = self.env.reset()
-            for steps in range(sample_episode_maxlen):
-                action = self.target_actor.action(
-                    torch.from_numpy(state).type(torch.float32).to(self.device)
-                ).cpu().numpy()
-                next_state, reward, done, _ = self.env.step(action)
-                if render and i == 0:
-                    self.env.render()
-                self.replaybuffer.store(state, action, next_state, reward)
-                if done:
-                    break
-                else:
-                    state = next_state
-            self.replaybuffer.done_episode()
+        with Pool(self.sample_process_num) as p:
+            trajectories = p.map(self.__sample_trajectory_worker, range(sample_episode_num))
+        return trajectories
 
     def __update_critic_td(self,
                            state_batch,
