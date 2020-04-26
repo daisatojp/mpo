@@ -46,6 +46,8 @@ def parse():
         '--alpha', type=float, default=10,
         help='scaling factor of the lagrangian multiplier in the M-step')
     parser.add_argument(
+        '--sample_process_num', type=int, default=5)
+    parser.add_argument(
         '--sample_episode_num', type=int, default=30,
         help='number of episodes to learn')
     parser.add_argument(

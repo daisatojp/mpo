@@ -1,4 +1,6 @@
 import os
+from time import sleep
+import multiprocessing as mp
 from multiprocessing import Pool
 import numpy as np
 from scipy.optimize import minimize
@@ -156,159 +158,10 @@ class MPO(object):
         self.η_kl_Σ = np.random.rand()
         self.η_kl = np.random.rand()
 
-        # control/log variables
-        self.iteration = 0
-
         self.replaybuffer = ReplayBuffer(backward_length=backward_length)
 
-    def __sample_trajectory_worker(self):
-        buff = []
-        state = self.env.reset()
-        for steps in range(sample_episode_maxlen):
-            action = self.target_actor.action(
-                torch.from_numpy(state).type(torch.float32).to(self.device)
-            ).cpu().numpy()
-            next_state, reward, done, _ = self.env.step(action)
-            # if self.render and i == 0:
-            #     self.env.render()
-            buff.append((state, action, next_state, reward))
-            if done:
-                break
-            else:
-                state = next_state
-        return buff
-
-    def __sample_trajectory(self, sample_episode_num, sample_episode_maxlen, render):
-        self.replaybuffer.clear()
-        with Pool(self.sample_process_num) as p:
-            trajectories = p.map(self.__sample_trajectory_worker, range(sample_episode_num))
-        return trajectories
-
-    def __update_critic_td(self,
-                           state_batch,
-                           action_batch,
-                           next_state_batch,
-                           reward_batch,
-                           sample_num=64):
-        """
-        :param state_batch: (B, ds)
-        :param action_batch: (B, da) or (B,)
-        :param next_state_batch: (B, ds)
-        :param reward_batch: (B,)
-        :param sample_num:
-        :return:
-        """
-        B = state_batch.size(0)
-        ds = self.ds
-        da = self.da
-        with torch.no_grad():
-            r = reward_batch  # (B,)
-            if self.continuous_action_space:
-                π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
-                π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
-                sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
-                expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
-                expected_next_q = self.target_critic.forward(
-                    expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
-                    sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
-                ).reshape(B, sample_num).mean(dim=1)  # (B,)
-            else:
-                π_p = self.target_actor.forward(next_state_batch)  # (B, da)
-                π = Categorical(probs=π_p)  # (B,)
-                π_prob = π.expand((da, B)).log_prob(
-                    torch.arange(da)[..., None].expand(-1, B).to(self.device)  # (da, B)
-                ).exp().transpose(0, 1)  # (B, da)
-                sampled_next_actions = self.A_eye[None, ...].expand(B, -1, -1)  # (B, da, da)
-                expanded_next_states = next_state_batch[:, None, :].expand(-1, da, -1)  # (B, da, ds)
-                expected_next_q = (
-                    self.target_critic.forward(
-                        expanded_next_states.reshape(-1, ds),  # (B * da, ds)
-                        sampled_next_actions.reshape(-1, da)  # (B * da, da)
-                    ).reshape(B, da) * π_prob  # (B, da)
-                ).sum(dim=-1)  # (B,)
-            y = r + self.γ * expected_next_q
-        self.critic_optimizer.zero_grad()
-        if self.continuous_action_space:
-            t = self.critic(
-                state_batch,
-                action_batch
-            ).squeeze()
-        else:
-            t = self.critic(
-                state_batch,
-                self.A_eye[action_batch.long()]
-            ).squeeze(-1)  # (B,)
-        loss = self.norm_loss_q(y, t)
-        loss.backward()
-        self.critic_optimizer.step()
-        return loss
-
-    def __update_critic_retrace(
-            self, states_batch, actions_batch, next_states_batch, rewards_batch, A=64):
-        """
-        :param states_batch: (B, L, ds)
-        :param actions_batch: (B, L, da)
-        :param next_states_batch: (B, L, ds)
-        :param rewards_batch: (B, L)
-        :return:
-        """
-        B = states_batch.size(0)
-        L = states_batch.size(1)
-        ds = states_batch.size(-1)
-        da = actions_batch.size(-1)
-        state_batch = states_batch[:, 0, :]  # (B, ds)
-        action_batch = actions_batch[:, 0, :]  # (B, da)
-
-        with torch.no_grad():
-            r = rewards_batch  # (B, L)
-
-            Qφ = self.target_critic.forward(
-                states_batch.reshape(-1, ds),
-                actions_batch.reshape(-1, da)
-            ).reshape(B, L)  # (B, L)
-
-            π_μ_next, π_Σ_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L,)
-            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)  # (B * L,)
-            next_sampled_actions_batch = π_next.sample((A,)).transpose(0, 1).reshape(B, L, A, da)  # (B, L, A, da)
-            next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, A, -1)  # (B, L, A, ds)
-            EQφ = self.target_critic.forward(
-                next_expanded_states_batch.reshape(-1, ds),
-                next_sampled_actions_batch.reshape(-1, da)
-            ).reshape(B, L, A).mean(dim=-1)  # (B, L)
-
-            π_μ, π_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
-            π = MultivariateNormal(π_μ.reshape(B, L, 1), scale_tril=π_Σ.reshape(B, L, 1, 1))  # (B, L)
-            b_μ, b_Σ = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
-            b = MultivariateNormal(b_μ.reshape(B, L, 1), scale_tril=b_Σ.reshape(B, L, 1, 1))  # (B, L)
-            c = π.log_prob(actions_batch).exp() / b.log_prob(actions_batch).exp()  # (B, L)
-            c = torch.clamp_max(c, 1.0)  # (B, L)
-            c[:, 0] = 1.0  # (B, L)
-            c = torch.cumprod(c, dim=1)  # (B, L)
-
-            γ = torch.ones(size=(B, L), dtype=torch.float32).to(self.device) * self.γ  # (B, L)
-            γ[:, 0] = 1.0  # (B, L)
-            γ = torch.cumprod(γ, dim=1)  # (B, L)
-
-            Qret = (Qφ[:, 0] + (γ * c * (r + EQφ - Qφ)).sum(dim=1))  # (B,)
-
-        self.critic_optimizer.zero_grad()
-        Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
-        loss = torch.sqrt(self.mse_loss(Qθ, Qret))
-        loss.backward()
-        clip_grad_norm_(self.critic.parameters(), 0.1)
-        self.critic_optimizer.step()
-        return loss.item()
-
-    def _update_param(self):
-        """
-        Sets target parameters to trained parameter
-        """
-        # Update policy parameters
-        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
-            target_param.data.copy_(param.data)
-        # Update critic parameters
-        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
-            target_param.data.copy_(param.data)
+        self.iteration = 0
+        self.render = False
 
     def train(self, iteration_num=100, log_dir='log', model_save_period=10, render=False):
         """
@@ -318,14 +171,15 @@ class MPO(object):
         :param render:
         """
 
+        self.render = render
+
         model_save_dir = os.path.join(log_dir, 'model')
         if not os.path.exists(model_save_dir):
             os.makedirs(model_save_dir)
         writer = SummaryWriter(os.path.join(log_dir, 'tb'))
 
         for it in range(self.iteration, iteration_num):
-            self.__sample_trajectory(
-                self.sample_episode_num, self.sample_episode_maxlen, render)
+            self.__sample_trajectory(self.sample_episode_num)
             buff_sz = len(self.replaybuffer)
 
             mean_reward = self.replaybuffer.mean_reward()
@@ -483,7 +337,7 @@ class MPO(object):
                             clip_grad_norm_(self.actor.parameters(), 0.1)
                             self.actor_optimizer.step()
 
-            self._update_param()
+            self.__update_param()
 
             it = it + 1
             mean_loss_q = np.mean(mean_loss_q)
@@ -524,31 +378,6 @@ class MPO(object):
         if writer is not None:
             writer.close()
 
-    def eval(self, episodes, episode_length, render=True):
-        """
-        method for evaluating current model (mean reward for a given number of
-        episodes and episode length)
-        :param episodes: (int) number of episodes for the evaluation
-        :param episode_length: (int) length of a single episode
-        :param render: (bool) flag if to render while evaluating
-        :return: (float) meaned reward achieved in the episodes
-        """
-
-        summed_rewards = 0
-        for episode in range(episodes):
-            reward = 0
-            observation = self.env.reset()
-            for step in range(episode_length):
-                action = self.target_actor.eval_step(observation)
-                new_observation, rew, done, _ = self.env.step(action)
-                reward += rew
-                if render:
-                    self.env.render()
-                observation = new_observation if not done else self.env.reset()
-
-            summed_rewards += reward
-        return summed_rewards/episodes
-
     def load_model(self, path=None):
         """
         loads a model from a given path
@@ -583,3 +412,153 @@ class MPO(object):
             'critic_optim_state_dict': self.critic_optimizer.state_dict()
         }
         torch.save(data, path)
+
+    def sample_trajectory_worker(self, i):
+        buff = []
+        state = self.env.reset()
+        for steps in range(self.sample_episode_maxlen):
+            action = self.target_actor.action(
+                torch.from_numpy(state).type(torch.float32).to(self.device)
+            ).cpu().numpy()
+            next_state, reward, done, _ = self.env.step(action)
+            buff.append((state, action, next_state, reward))
+            if self.render and ((mp.current_process()._identity[0] % self.sample_process_num) == 1):
+                self.env.render()
+                sleep(0.01)
+            if done:
+                break
+            else:
+                state = next_state
+        return buff
+
+    def __sample_trajectory(self, sample_episode_num):
+        self.replaybuffer.clear()
+        with Pool(self.sample_process_num) as p:
+            episodes = p.map(self.sample_trajectory_worker, range(sample_episode_num))
+        self.replaybuffer.store_episodes(episodes)
+
+    def __update_critic_td(self,
+                           state_batch,
+                           action_batch,
+                           next_state_batch,
+                           reward_batch,
+                           sample_num=64):
+        """
+        :param state_batch: (B, ds)
+        :param action_batch: (B, da) or (B,)
+        :param next_state_batch: (B, ds)
+        :param reward_batch: (B,)
+        :param sample_num:
+        :return:
+        """
+        B = state_batch.size(0)
+        ds = self.ds
+        da = self.da
+        with torch.no_grad():
+            r = reward_batch  # (B,)
+            if self.continuous_action_space:
+                π_μ, π_A = self.target_actor.forward(next_state_batch)  # (B,)
+                π = MultivariateNormal(π_μ, scale_tril=π_A)  # (B,)
+                sampled_next_actions = π.sample((sample_num,)).transpose(0, 1)  # (B, sample_num, da)
+                expanded_next_states = next_state_batch[:, None, :].expand(-1, sample_num, -1)  # (B, sample_num, ds)
+                expected_next_q = self.target_critic.forward(
+                    expanded_next_states.reshape(-1, ds),  # (B * sample_num, ds)
+                    sampled_next_actions.reshape(-1, da)  # (B * sample_num, da)
+                ).reshape(B, sample_num).mean(dim=1)  # (B,)
+            else:
+                π_p = self.target_actor.forward(next_state_batch)  # (B, da)
+                π = Categorical(probs=π_p)  # (B,)
+                π_prob = π.expand((da, B)).log_prob(
+                    torch.arange(da)[..., None].expand(-1, B).to(self.device)  # (da, B)
+                ).exp().transpose(0, 1)  # (B, da)
+                sampled_next_actions = self.A_eye[None, ...].expand(B, -1, -1)  # (B, da, da)
+                expanded_next_states = next_state_batch[:, None, :].expand(-1, da, -1)  # (B, da, ds)
+                expected_next_q = (
+                    self.target_critic.forward(
+                        expanded_next_states.reshape(-1, ds),  # (B * da, ds)
+                        sampled_next_actions.reshape(-1, da)  # (B * da, da)
+                    ).reshape(B, da) * π_prob  # (B, da)
+                ).sum(dim=-1)  # (B,)
+            y = r + self.γ * expected_next_q
+        self.critic_optimizer.zero_grad()
+        if self.continuous_action_space:
+            t = self.critic(
+                state_batch,
+                action_batch
+            ).squeeze()
+        else:
+            t = self.critic(
+                state_batch,
+                self.A_eye[action_batch.long()]
+            ).squeeze(-1)  # (B,)
+        loss = self.norm_loss_q(y, t)
+        loss.backward()
+        self.critic_optimizer.step()
+        return loss
+
+    def __update_critic_retrace(
+            self, states_batch, actions_batch, next_states_batch, rewards_batch, A=64):
+        """
+        :param states_batch: (B, L, ds)
+        :param actions_batch: (B, L, da)
+        :param next_states_batch: (B, L, ds)
+        :param rewards_batch: (B, L)
+        :return:
+        """
+        B = states_batch.size(0)
+        L = states_batch.size(1)
+        ds = states_batch.size(-1)
+        da = actions_batch.size(-1)
+        state_batch = states_batch[:, 0, :]  # (B, ds)
+        action_batch = actions_batch[:, 0, :]  # (B, da)
+
+        with torch.no_grad():
+            r = rewards_batch  # (B, L)
+
+            Qφ = self.target_critic.forward(
+                states_batch.reshape(-1, ds),
+                actions_batch.reshape(-1, da)
+            ).reshape(B, L)  # (B, L)
+
+            π_μ_next, π_Σ_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L,)
+            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)  # (B * L,)
+            next_sampled_actions_batch = π_next.sample((A,)).transpose(0, 1).reshape(B, L, A, da)  # (B, L, A, da)
+            next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, A, -1)  # (B, L, A, ds)
+            EQφ = self.target_critic.forward(
+                next_expanded_states_batch.reshape(-1, ds),
+                next_sampled_actions_batch.reshape(-1, da)
+            ).reshape(B, L, A).mean(dim=-1)  # (B, L)
+
+            π_μ, π_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
+            π = MultivariateNormal(π_μ.reshape(B, L, 1), scale_tril=π_Σ.reshape(B, L, 1, 1))  # (B, L)
+            b_μ, b_Σ = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
+            b = MultivariateNormal(b_μ.reshape(B, L, 1), scale_tril=b_Σ.reshape(B, L, 1, 1))  # (B, L)
+            c = π.log_prob(actions_batch).exp() / b.log_prob(actions_batch).exp()  # (B, L)
+            c = torch.clamp_max(c, 1.0)  # (B, L)
+            c[:, 0] = 1.0  # (B, L)
+            c = torch.cumprod(c, dim=1)  # (B, L)
+
+            γ = torch.ones(size=(B, L), dtype=torch.float32).to(self.device) * self.γ  # (B, L)
+            γ[:, 0] = 1.0  # (B, L)
+            γ = torch.cumprod(γ, dim=1)  # (B, L)
+
+            Qret = (Qφ[:, 0] + (γ * c * (r + EQφ - Qφ)).sum(dim=1))  # (B,)
+
+        self.critic_optimizer.zero_grad()
+        Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
+        loss = torch.sqrt(self.mse_loss(Qθ, Qret))
+        loss.backward()
+        clip_grad_norm_(self.critic.parameters(), 0.1)
+        self.critic_optimizer.step()
+        return loss.item()
+
+    def __update_param(self):
+        """
+        Sets target parameters to trained parameter
+        """
+        # Update policy parameters
+        for target_param, param in zip(self.target_actor.parameters(), self.actor.parameters()):
+            target_param.data.copy_(param.data)
+        # Update critic parameters
+        for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+            target_param.data.copy_(param.data)
