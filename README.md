@@ -18,7 +18,7 @@ Because of multiprocessing, currently supported OS is Ubuntu only.
 ### Continuous Action Space
 
 ```bash
-python3 train_continuous.py
+python3 train.py
   --device cuda:0
   --env LunarLanderContinuous-v2
   --policy_evaluation td
@@ -27,27 +27,36 @@ python3 train_continuous.py
   --kl_var_constraint 0.01
   --discount_factor 0.99
   --iteration_num 500
-  --sample_episode_num 50
+  --sample_process_num 5
+  --sample_episode_num 100
   --sample_episode_maxlen 500
   --episode_rerun_num 3
   --replay_length 1
-  --batch_size 128
-  --log_dir log
+  --batch_size 256
+  --sample_action_num 64
+  --log log
   --render
 ```
 
 ### Discrete Action Space
 
 ```bash
-python3 train_discrete.py
+python3 train.py
+  --device cuda:0
   --env LunarLander-v2
   --policy_evaluation td
-  --gamma 0.99
+  --dual_constraint 0.1
+  --kl_mean_constraint 0.01
+  --kl_var_constraint 0.01
+  --discount_factor 0.99
   --iteration_num 500
+  --sample_process_num 5
   --sample_episode_num 100
+  --sample_episode_maxlen 500
+  --episode_rerun_num 3
   --replay_length 1
-  --mb_size 128
-  --log_dir log_lunarlander-v2_td
+  --batch_size 256
+  --log log
   --render
 ```
 
