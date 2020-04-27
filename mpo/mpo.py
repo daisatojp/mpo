@@ -290,9 +290,13 @@ class MPO(object):
                     for _ in range(self.lagrange_iteration_num):
                         if self.continuous_action_space:
                             μ, A = self.actor.forward(state_batch)
-                            π = MultivariateNormal(μ, scale_tril=A)  # (B,)
+                            π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (B,)
+                            π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (B,)
                             loss_p = torch.mean(
-                                qij * π.expand((M, B)).log_prob(sampled_actions)  # (M, B)
+                                qij * (
+                                    π1.expand((M, B)).log_prob(sampled_actions)  # (M, B)
+                                    + π2.expand((M, B)).log_prob(sampled_actions)  # (M, B)
+                                )
                             )
                             mean_loss_p.append((-loss_p).item())
 
