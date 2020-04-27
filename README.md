@@ -7,6 +7,8 @@ Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym
 
 ## Support
 
+Because of multiprocessing, currently supported OS is Ubuntu only.
+
 * Policy Evaluation
     - [x] 1-step TD
     - [ ] Retrace

@@ -11,7 +11,7 @@ class ReplayBuffer:
         self.episodes = []
         self.tmp_episode_buff = []
 
-    def store(self, state, action, next_state, reward):
+    def store_step(self, state, action, next_state, reward):
         self.tmp_episode_buff.append(
             (state, action, next_state, reward))
 
@@ -23,6 +23,15 @@ class ReplayBuffer:
         self.idx_to_episode_idx.extend([len(self.episodes)] * usable_episode_len)
         self.episodes.append((states, actions, next_states, rewards))
         self.tmp_episode_buff = []
+
+    def store_episodes(self, episodes):
+        for episode in episodes:
+            states, actions, next_states, rewards = zip(*episode)
+            episode_len = len(states)
+            usable_episode_len = episode_len - self.backward_length
+            self.start_idx_of_episode.append(len(self.idx_to_episode_idx))
+            self.idx_to_episode_idx.extend([len(self.episodes)] * usable_episode_len)
+            self.episodes.append((states, actions, next_states, rewards))
 
     def clear(self):
         self.start_idx_of_episode = []
