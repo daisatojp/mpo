@@ -30,7 +30,7 @@ def gaussian_kl(mean1, mean2, cholesky1, cholesky2):
     calculates the KL between the old and new policy assuming a gaussian distribution
     :param mean1: mean of the actor
     :param mean2: mean of the target actor
-    :param cholesky1: ([[float]]) cholesky matrix of the actor covariance
+    :param cholesky1: 
     :param cholesky2: ([[float]]) cholesky matrix of the target actor covariance
     :return: C_μ, C_Σ: ([float],[[float]])mean and covariance terms of the KL
     """
@@ -152,11 +152,10 @@ class MPO(object):
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
         self.norm_loss_q = nn.SmoothL1Loss()
 
-        # initialize Lagrange Multiplier
         self.η = np.random.rand()
-        self.η_kl_μ = np.random.rand()
-        self.η_kl_Σ = np.random.rand()
-        self.η_kl = np.random.rand()
+        self.η_kl_μ = 0.0
+        self.η_kl_Σ = 0.0
+        self.η_kl = 0.0
 
         self.replaybuffer = ReplayBuffer(backward_length=backward_length)
 
@@ -187,6 +186,10 @@ class MPO(object):
             mean_loss_q = []
             mean_loss_p = []
             mean_loss_l = []
+            mean_est_q = []
+            max_kl_μ = []
+            max_kl_Σ = []
+            max_kl = []
 
             # Find better policy by gradient descent
             for _ in range(self.episode_rerun_num):
@@ -215,8 +218,9 @@ class MPO(object):
 
                     # Policy Evaluation
                     loss_q = None
+                    q = None
                     if self.policy_evaluation == 'td':
-                        loss_q = self.__update_critic_td(
+                        loss_q, q = self.__update_critic_td(
                             state_batch=state_batch,
                             action_batch=action_batch,
                             next_state_batch=next_state_batch,
@@ -234,6 +238,7 @@ class MPO(object):
                     if loss_q is None:
                         raise RuntimeError('invalid policy evaluation')
                     mean_loss_q.append(loss_q.item())
+                    mean_est_q.append(q.abs().mean().item())
 
                     # sample M additional action for each state
                     with torch.no_grad():
@@ -294,15 +299,17 @@ class MPO(object):
                             kl_μ, kl_Σ = gaussian_kl(
                                 mean1=μ, mean2=b_μ,
                                 cholesky1=A, cholesky2=b_A)
+                            max_kl_μ.append(kl_μ.item())
+                            max_kl_Σ.append(kl_Σ.item())
 
                             # Update lagrange multipliers by gradient descent
                             self.η_kl_μ -= self.α * (self.ε_kl_μ - kl_μ).detach().item()
                             self.η_kl_Σ -= self.α * (self.ε_kl_Σ - kl_Σ).detach().item()
 
-                            if self.η_kl_μ < 0:
-                                self.η_kl_μ = 0
-                            if self.η_kl_Σ < 0:
-                                self.η_kl_Σ = 0
+                            if self.η_kl_μ < 0.0:
+                                self.η_kl_μ = 0.0
+                            if self.η_kl_Σ < 0.0:
+                                self.η_kl_Σ = 0.0
 
                             self.actor_optimizer.zero_grad()
                             loss_l = -(
@@ -323,12 +330,13 @@ class MPO(object):
                             mean_loss_p.append((-loss_p).item())
 
                             kl = categorical_kl(p1=π_p, p2=b_p)
+                            max_kl.append(kl.item())
 
                             # Update lagrange multipliers by gradient descent
                             self.η_kl -= self.α * (self.ε_kl - kl).detach().item()
 
-                            if self.η_kl < 0:
-                                self.η_kl = 0
+                            if self.η_kl < 0.0:
+                                self.η_kl = 0.0
 
                             self.actor_optimizer.zero_grad()
                             loss_l = -(loss_p + self.η_kl * (self.ε_kl - kl))
@@ -339,10 +347,20 @@ class MPO(object):
 
             self.__update_param()
 
+            self.η_kl_μ = 0.0
+            self.η_kl_Σ = 0.0
+            self.η_kl = 0.0
+
             it = it + 1
             mean_loss_q = np.mean(mean_loss_q)
             mean_loss_p = np.mean(mean_loss_p)
             mean_loss_l = np.mean(mean_loss_l)
+            mean_est_q = np.mean(mean_est_q)
+            if self.continuous_action_space:
+                max_kl_μ = np.max(max_kl_μ)
+                max_kl_Σ = np.max(max_kl_Σ)
+            else:
+                max_kl = np.max(max_kl)
 
             print('iteration :', it)
             print('  mean return :', mean_return)
@@ -350,12 +368,13 @@ class MPO(object):
             print('  mean loss_q :', mean_loss_q)
             print('  mean loss_p :', mean_loss_p)
             print('  mean loss_l :', mean_loss_l)
+            print('  mean est_q :', mean_est_q)
             print('  η :', self.η)
             if self.continuous_action_space:
-                print('  η_kl_μ :', self.η_kl_μ)
-                print('  η_kl_Σ :', self.η_kl_Σ)
+                print('  max_kl_μ :', max_kl_μ)
+                print('  max_kl_Σ :', max_kl_Σ)
             else:
-                print('  η_kl :', self.η_kl)
+                print('  max_kl :', max_kl)
 
             # saving and logging
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
@@ -366,12 +385,13 @@ class MPO(object):
             writer.add_scalar('loss_q', mean_loss_q, it)
             writer.add_scalar('loss_p', mean_loss_p, it)
             writer.add_scalar('loss_l', mean_loss_l, it)
+            writer.add_scalar('mean_q', mean_est_q, it)
             writer.add_scalar('η', self.η, it)
             if self.continuous_action_space:
-                writer.add_scalar('η_kl_μ', self.η_kl_μ, it)
-                writer.add_scalar('η_kl_Σ', self.η_kl_Σ, it)
+                writer.add_scalar('max_kl_μ', max_kl_μ, it)
+                writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
             else:
-                writer.add_scalar('η_kl', self.η_kl, it)
+                writer.add_scalar('η_kl', max_kl, it)
             writer.flush()
 
         # end training
@@ -494,7 +514,7 @@ class MPO(object):
         loss = self.norm_loss_q(y, t)
         loss.backward()
         self.critic_optimizer.step()
-        return loss
+        return loss, y
 
     def __update_critic_retrace(
             self, states_batch, actions_batch, next_states_batch, rewards_batch, A=64):
