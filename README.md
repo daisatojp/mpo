@@ -24,7 +24,7 @@ python3 train.py
   --policy_evaluation td
   --dual_constraint 0.1
   --kl_mean_constraint 0.01
-  --kl_var_constraint 0.01
+  --kl_var_constraint 0.0001
   --discount_factor 0.99
   --iteration_num 500
   --sample_process_num 5
@@ -34,7 +34,7 @@ python3 train.py
   --replay_length 1
   --batch_size 256
   --sample_action_num 64
-  --log log
+  --log log_continuous
   --render
 ```
 
@@ -46,8 +46,7 @@ python3 train.py
   --env LunarLander-v2
   --policy_evaluation td
   --dual_constraint 0.1
-  --kl_mean_constraint 0.01
-  --kl_var_constraint 0.01
+  --kl_constraint 0.01
   --discount_factor 0.99
   --iteration_num 500
   --sample_process_num 5
@@ -56,7 +55,7 @@ python3 train.py
   --episode_rerun_num 3
   --replay_length 1
   --batch_size 256
-  --log log
+  --log log_discrete
   --render
 ```
 
