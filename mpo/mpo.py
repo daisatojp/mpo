@@ -5,6 +5,7 @@ from multiprocessing import Pool
 import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
+from IPython import embed
 import torch
 import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
@@ -25,26 +26,28 @@ def btr(m):
     return m.diagonal(dim1=-2, dim2=-1).sum(-1)
 
 
-def gaussian_kl(mean1, mean2, cholesky1, cholesky2):
+def gaussian_kl(μi, μ, Ai, A):
     """
-    calculates the KL between the old and new policy assuming a gaussian distribution
-    :param mean1: mean of the actor
-    :param mean2: mean of the target actor
-    :param cholesky1: 
-    :param cholesky2: ([[float]]) cholesky matrix of the target actor covariance
-    :return: C_μ, C_Σ: ([float],[[float]])mean and covariance terms of the KL
+    decoupled KL between two multivariate gaussian distribution
+    C_μ = KL(f(x|μi,Σi)||f(x|μ,Σi))
+    C_Σ = KL(f(x|μi,Σi)||f(x|μi,Σ))
+    :param μi: (B, n)
+    :param μ: (B, n)
+    :param Ai: (B, n, n)
+    :param A: (B, n, n)
+    :return: C_μ, C_Σ: mean and covariance terms of the KL
     """
-    if mean1.dim() == 2:
-        mean1 = mean1.unsqueeze(-1)
-    if mean2.dim() == 2:
-        mean2 = mean2.unsqueeze(-1)
-    Σ1 = cholesky1 @ bt(cholesky1)
-    Σ2 = cholesky2 @ bt(cholesky2)
-    Σ1_inv = Σ1.inverse()
-    inner_Σ = btr(Σ1_inv @ Σ2) - Σ1.size(-1) + torch.log(Σ1.det() / Σ2.det())
-    inner_μ = ((mean1 - mean2).transpose(-2, -1) @ Σ1_inv @ (mean1 - mean2)).squeeze()
-    C_μ = 0.5 * torch.mean(inner_Σ)
-    C_Σ = 0.5 * torch.mean(inner_μ)
+    n = A.size(-1)
+    μi = μi.unsqueeze(-1)  # (B, n, 1)
+    μ = μ.unsqueeze(-1)  # (B, n, 1)
+    Σi = Ai @ bt(Ai)  # (B, n, n)
+    Σ = A @ bt(A)  # (B, n, n)
+    Σi_inv = Σi.inverse()  # (B, n, n)
+    Σ_inv = Σ.inverse()  # (B, n, n)
+    inner_μ = ((μ - μi).transpose(-2, -1) @ Σi_inv @ (μ - μi)).squeeze()  # (B,)
+    inner_Σ = torch.log(Σ.det() / Σi.det()) - n + btr(Σ_inv @ Σi)  # (B,)
+    C_μ = 0.5 * torch.mean(inner_μ)
+    C_Σ = 0.5 * torch.mean(inner_Σ)
     return C_μ, C_Σ
 
 
@@ -301,10 +304,17 @@ class MPO(object):
                             mean_loss_p.append((-loss_p).item())
 
                             kl_μ, kl_Σ = gaussian_kl(
-                                mean1=μ, mean2=b_μ,
-                                cholesky1=A, cholesky2=b_A)
+                                μi=b_μ, μ=μ,
+                                Ai=b_A, A=A)
                             max_kl_μ.append(kl_μ.item())
                             max_kl_Σ.append(kl_Σ.item())
+
+                            if np.isnan(kl_μ.item()):
+                                print('kl_μ is nan')
+                                embed()
+                            if np.isnan(kl_Σ.item()):
+                                print('kl_Σ is nan')
+                                embed()
 
                             # Update lagrange multipliers by gradient descent
                             self.η_kl_μ -= self.α * (self.ε_kl_μ - kl_μ).detach().item()
@@ -409,7 +419,7 @@ class MPO(object):
         """
         load_path = path if path is not None else self.save_path
         checkpoint = torch.load(load_path)
-        self.episode = checkpoint['epoch']
+        self.iteration = checkpoint['iteration']
         self.critic.load_state_dict(checkpoint['critic_state_dict'])
         self.target_critic.load_state_dict(checkpoint['target_critic_state_dict'])
         self.actor.load_state_dict(checkpoint['actor_state_dict'])
