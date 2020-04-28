@@ -165,12 +165,18 @@ class MPO(object):
         self.iteration = 0
         self.render = False
 
-    def train(self, iteration_num=100, log_dir='log', model_save_period=10, render=False):
+    def train(self,
+              iteration_num=100,
+              log_dir='log',
+              model_save_period=10,
+              render=False,
+              debug=False):
         """
         :param iteration_num:
         :param log_dir:
         :param model_save_period:
         :param render:
+        :param debug:
         """
 
         self.render = render
@@ -272,21 +278,30 @@ class MPO(object):
                             target_q_np = target_q.cpu().numpy()  # (da, B)
 
                     # E-step
-                    # Update Dual-function
-                    def dual(η):
-                        """
-                        Dual function of the non-parametric variational
-                        g(η) = η*ε + η \sum \log (\sum \exp(Q(a, s)/η))
-                        """
-                        max_q = np.max(target_q_np, 0)
-                        return η * self.ε_dual + np.mean(max_q) \
-                            + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q) / η), 0)))
+                    if self.continuous_action_space:
+                        def dual(η):
+                            """
+                            dual function of the non-parametric variational
+                            g(η) = η*ε + η \sum \log (\sum \exp(Q(a, s)/η))
+                            """
+                            max_q = np.max(target_q_np, 0)
+                            return η * self.ε_dual + np.mean(max_q) \
+                                + η * np.mean(np.log(np.mean(np.exp((target_q_np - max_q) / η), axis=0)))
+                    else:
+                        def dual(η):
+                            """
+                            dual function of the non-parametric variational
+                            g(η) = η*ε + η \sum \log (\sum \exp(Q(a, s)/η))
+                            """
+                            max_q = np.max(target_q_np, 0)
+                            return η * self.ε_dual + np.mean(max_q) \
+                                + η * np.mean(np.log(np.sum(b_prob_np * np.exp((target_q_np - max_q) / η), axis=0)))
 
                     bounds = [(1e-6, None)]
                     res = minimize(dual, np.array([self.η]), method='SLSQP', bounds=bounds)
                     self.η = res.x[0]
 
-                    qij = torch.softmax(target_q / self.η, dim=0)  # (M, B)
+                    qij = torch.softmax(target_q / self.η, dim=0)  # (M, B) or (da, B)
 
                     # M-step
                     # update policy based on lagrangian
@@ -309,10 +324,10 @@ class MPO(object):
                             max_kl_μ.append(kl_μ.item())
                             max_kl_Σ.append(kl_Σ.item())
 
-                            if np.isnan(kl_μ.item()):
+                            if debug and np.isnan(kl_μ.item()):
                                 print('kl_μ is nan')
                                 embed()
-                            if np.isnan(kl_Σ.item()):
+                            if debug and np.isnan(kl_Σ.item()):
                                 print('kl_Σ is nan')
                                 embed()
 
@@ -345,6 +360,10 @@ class MPO(object):
 
                             kl = categorical_kl(p1=π_p, p2=b_p)
                             max_kl.append(kl.item())
+
+                            if debug and np.isnan(kl.item()):
+                                print('kl is nan')
+                                embed()
 
                             # Update lagrange multipliers by gradient descent
                             self.η_kl -= self.α * (self.ε_kl - kl).detach().item()

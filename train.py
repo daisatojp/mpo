@@ -32,7 +32,8 @@ def main():
     model.train(
         iteration_num=args.iteration_num,
         log_dir=args.log_dir,
-        render=args.render)
+        render=args.render,
+        debug=args.debug)
 
     env.close()
 
