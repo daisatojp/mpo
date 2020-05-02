@@ -6,13 +6,13 @@ import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
 from IPython import embed
+import gym
 import torch
 import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
 from torch.distributions import MultivariateNormal, Categorical
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from tensorboardX import SummaryWriter
-import gym
 from mpo.actor import ActorContinuous, ActorDiscrete
 from mpo.critic import CriticContinuous, CriticDiscrete
 from mpo.replaybuffer import ReplayBuffer
@@ -65,25 +65,22 @@ def categorical_kl(p1, p2):
 class MPO(object):
     """
     Maximum A Posteriori Policy Optimization (MPO)
-    :param env: (Gym Environment) gym environment to learn on
+    :param device:
+    :param env: gym environment
     :param dual_constraint: (float) hard constraint of the dual formulation in the E-step
     :param mean_constraint: (float) hard constraint of the mean in the M-step
     :param var_constraint: (float) hard constraint of the covariance in the M-step
     :param learning_rate: (float) learning rate in the Q-function
     :param alpha: (float) scaling factor of the lagrangian multiplier in the M-step
-    :param episodes: (int) number of training (evaluation) episodes
-    :param episode_length: (int) step size of one episode
+    :param sample_process_num:
+    :param sample_episode_num:
+    :param sample_episode_maxlen:
+    :param sample_action_num:
+    :param
     :param lagrange_it: (int) number of optimization steps of the Lagrangian
-    :param mb_size: (int) size of the sampled mini-batch
+    :param batch_size: (int) size of the sampled mini-batch
     :param sample_episodes: (int) number of sampling episodes
     :param add_act: (int) number of additional actions
-    :param actor_layers: (tuple) size of the hidden layers in the actor net
-    :param critic_layers: (tuple) size of the hidden layers in the critic net
-    :param log: (boolean) saves log if True
-    :param log_dir: (str) directory in which log is saved
-    :param render: (boolean) renders the simulation if True
-    :param save: (boolean) saves the model if True
-    :param save_path: (str) path for saving and loading a model
     """
     def __init__(self,
                  device,
@@ -99,10 +96,11 @@ class MPO(object):
                  sample_episode_num=30,
                  sample_episode_maxlen=200,
                  sample_action_num=64,
-                 backward_length=0,
-                 episode_rerun_num=5,
                  batch_size=64,
-                 lagrange_iteration_num=5):
+                 episode_rerun_num=5,
+                 lagrange_iteration_num=5,
+                 retrace_length=0,
+                 multiprocessing=False):
         self.device = device
         self.env = env
         if self.env.action_space.dtype == np.float32:
@@ -126,9 +124,10 @@ class MPO(object):
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxlen = sample_episode_maxlen
         self.sample_action_num = sample_action_num
-        self.episode_rerun_num = episode_rerun_num
         self.batch_size = batch_size
+        self.episode_rerun_num = episode_rerun_num
         self.lagrange_iteration_num = lagrange_iteration_num
+        self.multiprocessing = multiprocessing
 
         if not self.continuous_action_space:
             self.A_eye = torch.eye(self.da).to(self.device)
@@ -160,7 +159,8 @@ class MPO(object):
         self.η_kl_Σ = 0.0
         self.η_kl = 0.0
 
-        self.replaybuffer = ReplayBuffer(backward_length=backward_length)
+        self.replaybuffer = ReplayBuffer(
+            retrace_length=retrace_length)
 
         self.iteration = 0
         self.render = False
@@ -205,7 +205,7 @@ class MPO(object):
                 for indices in tqdm(BatchSampler(SubsetRandomSampler(range(buff_sz)), self.batch_size, False)):
                     B = len(indices)
                     M = self.sample_action_num
-                    L = self.replaybuffer.backward_length
+                    L = self.replaybuffer.retrace_length
                     ds = self.ds
                     da = self.da
 
@@ -475,9 +475,14 @@ class MPO(object):
             ).cpu().numpy()
             next_state, reward, done, _ = self.env.step(action)
             buff.append((state, action, next_state, reward))
-            if self.render and ((mp.current_process()._identity[0] % self.sample_process_num) == 1):
-                self.env.render()
-                sleep(0.01)
+            if self.multiprocessing:
+                if self.render and ((mp.current_process()._identity[0] % self.sample_process_num) == 1):
+                    self.env.render()
+                    sleep(0.01)
+            else:
+                if self.render and i == 0:
+                    self.env.render()
+                    sleep(0.01)
             if done:
                 break
             else:
@@ -486,8 +491,11 @@ class MPO(object):
 
     def __sample_trajectory(self, sample_episode_num):
         self.replaybuffer.clear()
-        with Pool(self.sample_process_num) as p:
-            episodes = p.map(self.sample_trajectory_worker, range(sample_episode_num))
+        if self.multiprocessing:
+            with Pool(self.sample_process_num) as p:
+                episodes = p.map(self.sample_trajectory_worker, range(sample_episode_num))
+        else:
+            episodes = [self.sample_trajectory_worker(i) for i in range(sample_episode_num)]
         self.replaybuffer.store_episodes(episodes)
 
     def __update_critic_td(self,

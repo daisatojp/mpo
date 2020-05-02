@@ -22,9 +22,10 @@ def main():
         sample_episode_num=args.sample_episode_num,
         sample_episode_maxlen=args.sample_episode_maxlen,
         sample_action_num=args.sample_action_num,
-        episode_rerun_num=args.episode_rerun_num,
         batch_size=args.batch_size,
-        lagrange_iteration_num=args.lagrange_iteration_num)
+        episode_rerun_num=args.episode_rerun_num,
+        lagrange_iteration_num=args.lagrange_iteration_num,
+        retrace_length=args.retrace_length)
 
     if args.load is not None:
         model.load_model(args.load)

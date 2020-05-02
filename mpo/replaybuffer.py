@@ -2,8 +2,8 @@ import numpy as np
 
 
 class ReplayBuffer:
-    def __init__(self, backward_length=0):
-        self.backward_length = backward_length
+    def __init__(self, retrace_length=0):
+        self.retrace_length = retrace_length
 
         # buffers
         self.start_idx_of_episode = []
@@ -18,7 +18,7 @@ class ReplayBuffer:
     def done_episode(self):
         states, actions, next_states, rewards = zip(*self.tmp_episode_buff)
         episode_len = len(states)
-        usable_episode_len = episode_len - self.backward_length
+        usable_episode_len = episode_len - self.retrace_length
         self.start_idx_of_episode.append(len(self.idx_to_episode_idx))
         self.idx_to_episode_idx.extend([len(self.episodes)] * usable_episode_len)
         self.episodes.append((states, actions, next_states, rewards))
@@ -28,7 +28,7 @@ class ReplayBuffer:
         for episode in episodes:
             states, actions, next_states, rewards = zip(*episode)
             episode_len = len(states)
-            usable_episode_len = episode_len - self.backward_length
+            usable_episode_len = episode_len - self.retrace_length
             self.start_idx_of_episode.append(len(self.idx_to_episode_idx))
             self.idx_to_episode_idx.extend([len(self.episodes)] * usable_episode_len)
             self.episodes.append((states, actions, next_states, rewards))
@@ -44,7 +44,7 @@ class ReplayBuffer:
         start_idx = self.start_idx_of_episode[episode_idx]
         idx_in_episode = idx - start_idx
         states, actions, next_states, rewards = self.episodes[episode_idx]
-        p = slice(idx_in_episode, idx_in_episode + self.backward_length + 1)
+        p = slice(idx_in_episode, idx_in_episode + self.retrace_length + 1)
         states, actions, next_states, rewards = states[p], actions[p], next_states[p], rewards[p]
         return states, actions, next_states, rewards
 

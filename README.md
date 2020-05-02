@@ -7,8 +7,6 @@ Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym
 
 ## Support
 
-Because of multiprocessing, currently supported OS is Ubuntu only.
-
 * Policy Evaluation
     - [x] 1-step TD
     - [ ] Retrace
@@ -30,10 +28,9 @@ python3 train.py
   --sample_process_num 5
   --sample_episode_num 100
   --sample_episode_maxlen 500
-  --episode_rerun_num 3
-  --replay_length 1
-  --batch_size 256
   --sample_action_num 64
+  --batch_size 256
+  --episode_rerun_num 3
   --log log_continuous
   --render
 ```
@@ -52,9 +49,8 @@ python3 train.py
   --sample_process_num 5
   --sample_episode_num 100
   --sample_episode_maxlen 500
-  --episode_rerun_num 3
-  --replay_length 1
   --batch_size 256
+  --episode_rerun_num 3
   --log log_discrete
   --render
 ```

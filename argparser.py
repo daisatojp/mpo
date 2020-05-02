@@ -30,16 +30,15 @@ def parse():
                         help='length of an episode (number of training steps)')
     parser.add_argument('--sample_action_num', type=int, default=64,
                         help='number of sampled actions')
-    parser.add_argument('--replay_length', type=int, default=1,
-                        help='replay length')
-    parser.add_argument('--replay_padding', action='store_true')
-    parser.add_argument('--episode_rerun_num', type=int, default=5,
-                        help='number of reruns of sampled episode')
     parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--lagrange_iteration_num', type=int, default=5,
-                        help='number of optimization steps of the Lagrangian')
     parser.add_argument('--iteration_num', type=int, default=1000,
                         help='number of iteration to learn')
+    parser.add_argument('--lagrange_iteration_num', type=int, default=5,
+                        help='number of optimization steps of the Lagrangian')
+    parser.add_argument('--episode_rerun_num', type=int, default=5,
+                        help='number of reruns of sampled episode')
+    parser.add_argument('--retrace_length', type=int, default=1)
+    parser.add_argument('--multiprocessing', action='store_true')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='log directory')
     parser.add_argument('--render', action='store_true')
