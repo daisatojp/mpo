@@ -5,53 +5,47 @@ Implementation of the Maximum A Posteriori Policy Optimization
 [paper2](https://arxiv.org/abs/1812.02256.pdf))
 Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym) environments.
 
-## Support
-
-* Policy Evaluation
-    - [x] 1-step TD
-    - [ ] Retrace
-
-## How to use
+## How to Run
 
 ### Continuous Action Space
 
 ```bash
-python3 train.py
-  --device cuda:0
-  --env LunarLanderContinuous-v2
-  --policy_evaluation td
-  --dual_constraint 0.1
-  --kl_mean_constraint 0.01
-  --kl_var_constraint 0.0001
-  --discount_factor 0.99
-  --iteration_num 500
-  --sample_process_num 5
-  --sample_episode_num 100
-  --sample_episode_maxlen 500
-  --sample_action_num 64
-  --batch_size 256
-  --episode_rerun_num 3
-  --log log_continuous
+python3 train.py \
+  --device cuda:0 \
+  --env LunarLanderContinuous-v2 \
+  --policy_evaluation td \
+  --dual_constraint 0.1 \
+  --kl_mean_constraint 0.01 \
+  --kl_var_constraint 0.0001 \
+  --discount_factor 0.99 \
+  --iteration_num 500 \
+  --sample_process_num 5 \
+  --sample_episode_num 100 \
+  --sample_episode_maxlen 500 \
+  --sample_action_num 64 \
+  --batch_size 256 \
+  --episode_rerun_num 3 \
+  --log log_continuous \
   --render
 ```
 
 ### Discrete Action Space
 
 ```bash
-python3 train.py
-  --device cuda:0
-  --env LunarLander-v2
-  --policy_evaluation td
-  --dual_constraint 0.1
-  --kl_constraint 0.01
-  --discount_factor 0.99
-  --iteration_num 500
-  --sample_process_num 5
-  --sample_episode_num 100
-  --sample_episode_maxlen 500
-  --batch_size 256
-  --episode_rerun_num 3
-  --log log_discrete
+python3 train.py \
+  --device cuda:0 \
+  --env LunarLander-v2 \
+  --policy_evaluation td \
+  --dual_constraint 0.1 \
+  --kl_constraint 0.01 \
+  --discount_factor 0.99 \
+  --iteration_num 500 \
+  --sample_process_num 5 \
+  --sample_episode_num 100 \
+  --sample_episode_maxlen 500 \
+  --batch_size 256 \
+  --episode_rerun_num 3 \
+  --log log_discrete \
   --render
 ```
 
