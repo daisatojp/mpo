@@ -68,24 +68,24 @@ class MPO(object):
     :param device:
     :param env: gym environment
     :param dual_constraint: (float) hard constraint of the dual formulation in the E-step
-    :param mean_constraint: (float) hard constraint of the mean in the M-step
-    :param var_constraint: (float) hard constraint of the covariance in the M-step
-    :param learning_rate: (float) learning rate in the Q-function
+    :param kl_mean_constraint: (float) hard constraint of the mean in the M-step
+    :param kl_var_constraint: (float) hard constraint of the covariance in the M-step
+    :param kl_constraint:
+    :param discount_factor: (float) learning rate in the Q-function
     :param alpha: (float) scaling factor of the lagrangian multiplier in the M-step
     :param sample_process_num:
     :param sample_episode_num:
     :param sample_episode_maxlen:
     :param sample_action_num:
-    :param
-    :param lagrange_it: (int) number of optimization steps of the Lagrangian
     :param batch_size: (int) size of the sampled mini-batch
+    :param episode_rerun_num:
+    :param lagrange_iteration_num: (int) number of optimization steps of the Lagrangian
     :param sample_episodes: (int) number of sampling episodes
     :param add_act: (int) number of additional actions
     """
     def __init__(self,
                  device,
                  env,
-                 policy_evaluation='td',
                  dual_constraint=0.1,
                  kl_mean_constraint=0.01,
                  kl_var_constraint=0.01,
@@ -99,7 +99,6 @@ class MPO(object):
                  batch_size=64,
                  episode_rerun_num=5,
                  lagrange_iteration_num=5,
-                 retrace_length=0,
                  multiprocessing=False):
         self.device = device
         self.env = env
@@ -113,7 +112,6 @@ class MPO(object):
         else:
             self.da = env.action_space.n
 
-        self.policy_evaluation = policy_evaluation
         self.ε_dual = dual_constraint
         self.ε_kl_μ = kl_mean_constraint  # hard constraint for the KL
         self.ε_kl_Σ = kl_var_constraint  # hard constraint for the KL
@@ -159,8 +157,7 @@ class MPO(object):
         self.η_kl_Σ = 0.0
         self.η_kl = 0.0
 
-        self.replaybuffer = ReplayBuffer(
-            retrace_length=retrace_length)
+        self.replaybuffer = ReplayBuffer()
 
         self.iteration = 0
         self.render = False
@@ -201,49 +198,32 @@ class MPO(object):
             max_kl = []
 
             # Find better policy by gradient descent
-            for _ in range(self.episode_rerun_num):
-                for indices in tqdm(BatchSampler(SubsetRandomSampler(range(buff_sz)), self.batch_size, False)):
+            for r in range(self.episode_rerun_num):
+                for indices in tqdm(
+                        BatchSampler(
+                            SubsetRandomSampler(range(buff_sz)), self.batch_size, False),
+                        desc='training {}/{}'.format(r+1, self.episode_rerun_num)):
                     B = len(indices)
                     M = self.sample_action_num
-                    L = self.replaybuffer.retrace_length
                     ds = self.ds
                     da = self.da
 
-                    states_batch, actions_batch, next_states_batch, rewards_batch = zip(
+                    state_batch, action_batch, next_state_batch, reward_batch = zip(
                         *[self.replaybuffer[index] for index in indices])
 
-                    states_batch = torch.from_numpy(np.stack(states_batch)).type(torch.float32).to(self.device)  # (B, L, ds)
-                    actions_batch = torch.from_numpy(np.stack(actions_batch)).type(torch.float32).to(self.device)  # (B, L, da) or (B, L)
-                    next_states_batch = torch.from_numpy(np.stack(next_states_batch)).type(torch.float32).to(self.device)  # (B, L, ds)
-                    rewards_batch = torch.from_numpy(np.stack(rewards_batch)).type(torch.float32).to(self.device)  # (B, L)
-
-                    state_batch = states_batch[:, 0, :]  # (B, ds)
-                    if self.continuous_action_space:
-                        action_batch = actions_batch[:, 0, :]  # (B, da)
-                    else:
-                        action_batch = actions_batch[:, 0]  # (B,)
-                    next_state_batch = next_states_batch[:, 0, :]  # (B, ds)
-                    reward_batch = rewards_batch[:, 0]  # (B,)
+                    state_batch = torch.from_numpy(np.stack(state_batch)).type(torch.float32).to(self.device)  # (B, ds)
+                    action_batch = torch.from_numpy(np.stack(action_batch)).type(torch.float32).to(self.device)  # (B, da) or (B,)
+                    next_state_batch = torch.from_numpy(np.stack(next_state_batch)).type(torch.float32).to(self.device)  # (B, ds)
+                    reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32).to(self.device)  # (B,)
 
                     # Policy Evaluation
-                    loss_q = None
-                    q = None
-                    if self.policy_evaluation == 'td':
-                        loss_q, q = self.__update_critic_td(
-                            state_batch=state_batch,
-                            action_batch=action_batch,
-                            next_state_batch=next_state_batch,
-                            reward_batch=reward_batch,
-                            sample_num=self.sample_action_num
-                        )
-                    if self.policy_evaluation == 'retrace':
-                        loss_q = self.__update_critic_retrace(
-                            states_batch=states_batch,
-                            actions_batch=actions_batch,
-                            next_states_batch=next_states_batch,
-                            rewards_batch=rewards_batch,
-                            A=self.sample_action_num
-                        )
+                    loss_q, q = self.__update_critic_td(
+                        state_batch=state_batch,
+                        action_batch=action_batch,
+                        next_state_batch=next_state_batch,
+                        reward_batch=reward_batch,
+                        sample_num=self.sample_action_num
+                    )
                     if loss_q is None:
                         raise RuntimeError('invalid policy evaluation')
                     mean_loss_q.append(loss_q.item())
@@ -495,7 +475,8 @@ class MPO(object):
             with Pool(self.sample_process_num) as p:
                 episodes = p.map(self.sample_trajectory_worker, range(sample_episode_num))
         else:
-            episodes = [self.sample_trajectory_worker(i) for i in range(sample_episode_num)]
+            episodes = [self.sample_trajectory_worker(i)
+                        for i in tqdm(range(sample_episode_num), desc='sample_trajectory')]
         self.replaybuffer.store_episodes(episodes)
 
     def __update_critic_td(self,
@@ -556,62 +537,6 @@ class MPO(object):
         loss.backward()
         self.critic_optimizer.step()
         return loss, y
-
-    def __update_critic_retrace(
-            self, states_batch, actions_batch, next_states_batch, rewards_batch, A=64):
-        """
-        :param states_batch: (B, L, ds)
-        :param actions_batch: (B, L, da)
-        :param next_states_batch: (B, L, ds)
-        :param rewards_batch: (B, L)
-        :return:
-        """
-        B = states_batch.size(0)
-        L = states_batch.size(1)
-        ds = states_batch.size(-1)
-        da = actions_batch.size(-1)
-        state_batch = states_batch[:, 0, :]  # (B, ds)
-        action_batch = actions_batch[:, 0, :]  # (B, da)
-
-        with torch.no_grad():
-            r = rewards_batch  # (B, L)
-
-            Qφ = self.target_critic.forward(
-                states_batch.reshape(-1, ds),
-                actions_batch.reshape(-1, da)
-            ).reshape(B, L)  # (B, L)
-
-            π_μ_next, π_Σ_next = self.actor.forward(next_states_batch.reshape(B * L, ds))  # (B * L,)
-            π_next = MultivariateNormal(π_μ_next, scale_tril=π_Σ_next)  # (B * L,)
-            next_sampled_actions_batch = π_next.sample((A,)).transpose(0, 1).reshape(B, L, A, da)  # (B, L, A, da)
-            next_expanded_states_batch = next_states_batch.reshape(B, L, 1, ds).expand(-1, -1, A, -1)  # (B, L, A, ds)
-            EQφ = self.target_critic.forward(
-                next_expanded_states_batch.reshape(-1, ds),
-                next_sampled_actions_batch.reshape(-1, da)
-            ).reshape(B, L, A).mean(dim=-1)  # (B, L)
-
-            π_μ, π_Σ = self.actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
-            π = MultivariateNormal(π_μ.reshape(B, L, 1), scale_tril=π_Σ.reshape(B, L, 1, 1))  # (B, L)
-            b_μ, b_Σ = self.target_actor.forward(states_batch.reshape(B * L, ds))  # (B * L,)
-            b = MultivariateNormal(b_μ.reshape(B, L, 1), scale_tril=b_Σ.reshape(B, L, 1, 1))  # (B, L)
-            c = π.log_prob(actions_batch).exp() / b.log_prob(actions_batch).exp()  # (B, L)
-            c = torch.clamp_max(c, 1.0)  # (B, L)
-            c[:, 0] = 1.0  # (B, L)
-            c = torch.cumprod(c, dim=1)  # (B, L)
-
-            γ = torch.ones(size=(B, L), dtype=torch.float32).to(self.device) * self.γ  # (B, L)
-            γ[:, 0] = 1.0  # (B, L)
-            γ = torch.cumprod(γ, dim=1)  # (B, L)
-
-            Qret = (Qφ[:, 0] + (γ * c * (r + EQφ - Qφ)).sum(dim=1))  # (B,)
-
-        self.critic_optimizer.zero_grad()
-        Qθ = self.critic.forward(state_batch, action_batch).squeeze()  # (B,)
-        loss = torch.sqrt(self.mse_loss(Qθ, Qret))
-        loss.backward()
-        clip_grad_norm_(self.critic.parameters(), 0.1)
-        self.critic_optimizer.step()
-        return loss.item()
 
     def __update_param(self):
         """

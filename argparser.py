@@ -9,8 +9,6 @@ def parse():
     parser.add_argument('--device', type=str, default='cpu')
     parser.add_argument('--env', type=str, default='LunarLanderContinuous-v2',
                         help='gym environment')
-    parser.add_argument('--policy_evaluation', type=str, default='td',
-                        help='policy evalution method')
     parser.add_argument('--dual_constraint', type=float, default=0.1,
                         help='hard constraint of the E-step')
     parser.add_argument('--kl_mean_constraint', type=float, default=0.01,
@@ -37,7 +35,6 @@ def parse():
                         help='number of optimization steps of the Lagrangian')
     parser.add_argument('--episode_rerun_num', type=int, default=5,
                         help='number of reruns of sampled episode')
-    parser.add_argument('--retrace_length', type=int, default=1)
     parser.add_argument('--multiprocessing', action='store_true')
     parser.add_argument('--log_dir', type=str, default=None,
                         help='log directory')
