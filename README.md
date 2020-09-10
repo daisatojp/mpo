@@ -7,13 +7,25 @@ Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym
 
 ## How to Run
 
+I tested on the below environment.
+* Ubuntu 18.04
+* Python 3.7
+* PyTorch 1.6
+
+### INSTALL
+
+Install PyTorch https://pytorch.org/
+
+```bash
+pip install gym Box2D IPython tqdm scipy tensorboard tensorboardx
+```
+
 ### Continuous Action Space
 
 ```bash
-python3 train.py \
+python train.py \
   --device cuda:0 \
   --env LunarLanderContinuous-v2 \
-  --policy_evaluation td \
   --dual_constraint 0.1 \
   --kl_mean_constraint 0.01 \
   --kl_var_constraint 0.0001 \
@@ -32,10 +44,9 @@ python3 train.py \
 ### Discrete Action Space
 
 ```bash
-python3 train.py \
+python train.py \
   --device cuda:0 \
   --env LunarLander-v2 \
-  --policy_evaluation td \
   --dual_constraint 0.1 \
   --kl_constraint 0.01 \
   --discount_factor 0.99 \
