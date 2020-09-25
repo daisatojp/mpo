@@ -31,7 +31,6 @@ python train.py \
   --kl_var_constraint 0.0001 \
   --discount_factor 0.99 \
   --iteration_num 500 \
-  --sample_process_num 5 \
   --sample_episode_num 100 \
   --sample_episode_maxlen 500 \
   --sample_action_num 64 \
@@ -51,7 +50,6 @@ python train.py \
   --kl_constraint 0.01 \
   --discount_factor 0.99 \
   --iteration_num 500 \
-  --sample_process_num 5 \
   --sample_episode_num 100 \
   --sample_episode_maxlen 500 \
   --batch_size 256 \
