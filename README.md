@@ -26,16 +26,6 @@ pip install gym Box2D IPython tqdm scipy tensorboard tensorboardx
 python train.py \
   --device cuda:0 \
   --env LunarLanderContinuous-v2 \
-  --dual_constraint 0.1 \
-  --kl_mean_constraint 0.01 \
-  --kl_var_constraint 0.0001 \
-  --discount_factor 0.99 \
-  --iteration_num 500 \
-  --sample_episode_num 100 \
-  --sample_episode_maxlen 500 \
-  --sample_action_num 64 \
-  --batch_size 256 \
-  --episode_rerun_num 3 \
   --log log_continuous \
   --render
 ```
@@ -46,14 +36,6 @@ python train.py \
 python train.py \
   --device cuda:0 \
   --env LunarLander-v2 \
-  --dual_constraint 0.1 \
-  --kl_constraint 0.01 \
-  --discount_factor 0.99 \
-  --iteration_num 500 \
-  --sample_episode_num 100 \
-  --sample_episode_maxlen 500 \
-  --batch_size 256 \
-  --episode_rerun_num 3 \
   --log log_discrete \
   --render
 ```

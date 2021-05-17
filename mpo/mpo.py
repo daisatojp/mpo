@@ -80,14 +80,13 @@ class MPO(object):
         correspond to [2] p.6 ε_π for discrete action space
     :param discount_factor: (float) discount factor used in Policy Evaluation
     :param alpha_scale: (float) scaling factor of the lagrangian multiplier in the M-step
-    :param sample_episode_num:
-    :param sample_episode_maxlen:
+    :param sample_episode_num: the number of sampled episodes
+    :param sample_episode_maxstep: maximum sample steps of an episode
     :param sample_action_num:
     :param batch_size: (int) size of the sampled mini-batch
     :param episode_rerun_num:
     :param mstep_iteration_num: (int) the number of iterations of the M-step
-    :param sample_episodes: (int) number of sampling episodes
-    :param add_act: (int) number of additional actions
+    :param evaluate_episode_maxstep: maximum evaluate steps of an episode
     [1] https://arxiv.org/pdf/1806.06920.pdf
     [2] https://arxiv.org/pdf/1812.02256.pdf
     """
@@ -96,16 +95,17 @@ class MPO(object):
                  env,
                  dual_constraint=0.1,
                  kl_mean_constraint=0.01,
-                 kl_var_constraint=0.01,
+                 kl_var_constraint=0.0001,
                  kl_constraint=0.01,
                  discount_factor=0.99,
-                 alpha_scale=10,
+                 alpha_scale=10.0,
                  sample_episode_num=30,
-                 sample_episode_maxlen=200,
+                 sample_episode_maxstep=200,
                  sample_action_num=64,
-                 batch_size=64,
-                 episode_rerun_num=5,
-                 mstep_iteration_num=5):
+                 batch_size=256,
+                 episode_rerun_num=3,
+                 mstep_iteration_num=5,
+                 evaluate_episode_maxstep=200):
         self.device = device
         self.env = env
         if self.env.action_space.dtype == np.float32:
@@ -128,11 +128,12 @@ class MPO(object):
         self.γ = discount_factor
         self.α_scale = alpha_scale  # scaling factor of the lagrangian multiplier in the M-step
         self.sample_episode_num = sample_episode_num
-        self.sample_episode_maxlen = sample_episode_maxlen
+        self.sample_episode_maxstep = sample_episode_maxstep
         self.sample_action_num = sample_action_num
         self.batch_size = batch_size
         self.episode_rerun_num = episode_rerun_num
         self.mstep_iteration_num = mstep_iteration_num
+        self.evaluate_episode_maxstep = evaluate_episode_maxstep
 
         if not self.continuous_action_space:
             self.A_eye = torch.eye(self.da).to(self.device)
@@ -166,11 +167,12 @@ class MPO(object):
 
         self.replaybuffer = ReplayBuffer()
 
+        self.max_return_eval = -np.inf
         self.iteration = 0
         self.render = False
 
     def train(self,
-              iteration_num=100,
+              iteration_num=500,
               log_dir='log',
               model_save_period=10,
               render=False):
@@ -389,6 +391,11 @@ class MPO(object):
 
             self.__update_param()
 
+            self.actor.eval()
+            return_eval = self.__evaluate()
+            self.actor.train()
+            self.max_return_eval = max(self.max_return_eval, return_eval)
+
             self.α_kl_μ = 0.0
             self.α_kl_Σ = 0.0
             self.α_kl = 0.0
@@ -405,6 +412,8 @@ class MPO(object):
                 max_kl = np.max(max_kl)
 
             print('iteration :', it)
+            print('  max_return_eval :', self.max_return_eval)
+            print('  return_eval :', return_eval)
             print('  mean return :', mean_return)
             print('  mean reward :', mean_reward)
             print('  mean loss_q :', mean_loss_q)
@@ -422,6 +431,8 @@ class MPO(object):
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
             if it % model_save_period == 0:
                 self.save_model(os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
+            writer.add_scalar('max_return_eval', self.max_return_eval)
+            writer.add_scalar('return_eval', return_eval)
             writer.add_scalar('return', mean_return, it)
             writer.add_scalar('reward', mean_reward, it)
             writer.add_scalar('loss_q', mean_loss_q, it)
@@ -475,10 +486,10 @@ class MPO(object):
         }
         torch.save(data, path)
 
-    def sample_trajectory_worker(self, i):
+    def __sample_trajectory_worker(self, i):
         buff = []
         state = self.env.reset()
-        for steps in range(self.sample_episode_maxlen):
+        for steps in range(self.sample_episode_maxstep):
             action = self.target_actor.action(
                 torch.from_numpy(state).type(torch.float32).to(self.device)
             ).cpu().numpy()
@@ -495,9 +506,29 @@ class MPO(object):
 
     def __sample_trajectory(self, sample_episode_num):
         self.replaybuffer.clear()
-        episodes = [self.sample_trajectory_worker(i)
+        episodes = [self.__sample_trajectory_worker(i)
                     for i in tqdm(range(sample_episode_num), desc='sample_trajectory')]
         self.replaybuffer.store_episodes(episodes)
+
+    def __evaluate(self):
+        """
+        :return: average return over 100 consecutive episodes
+        """
+        with torch.no_grad():
+            total_rewards = []
+            for e in tqdm(range(100), desc='evaluating'):
+                total_reward = 0.0
+                state = self.env.reset()
+                for s in range(self.evaluate_episode_maxstep):
+                    action = self.actor.action(
+                        torch.from_numpy(state).type(torch.float32).to(self.device)
+                    ).cpu().numpy()
+                    state, reward, done, _ = self.env.step(action)
+                    total_reward += reward
+                    if done:
+                        break
+                total_rewards.append(total_reward)
+            return np.mean(total_rewards)
 
     def __update_critic_td(self,
                            state_batch,
