@@ -8,9 +8,9 @@ Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym
 ## How to Run
 
 I tested on the below environment.
-* Ubuntu 18.04
+* Windows 10
 * Python 3.7
-* PyTorch 1.6
+* PyTorch 1.8.1
 
 ### INSTALL
 

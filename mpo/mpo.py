@@ -221,6 +221,7 @@ class MPO(object):
                     reward_batch = torch.from_numpy(np.stack(reward_batch)).type(torch.float32).to(self.device)  # (K,)
 
                     # Policy Evaluation
+                    # [2] 3 Policy Evaluation (Step 1)
                     loss_q, q = self.__update_critic_td(
                         state_batch=state_batch,
                         action_batch=action_batch,
