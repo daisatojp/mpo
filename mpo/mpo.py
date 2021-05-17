@@ -32,7 +32,8 @@ def gaussian_kl(μi, μ, Ai, A):
     :param μ: (B, n)
     :param Ai: (B, n, n)
     :param A: (B, n, n)
-    :return: C_μ, C_Σ: mean and covariance terms of the KL
+    :return: C_μ, C_Σ: (B,), (B,)
+        mean and covariance terms of the KL
     ref : https://stanford.edu/~jduchi/projects/general_notes.pdf page.13
     """
     n = A.size(-1)
@@ -75,11 +76,10 @@ class MPO(object):
         (float) hard constraint of the covariance in the M-step
         correspond to [2] p.6 ε_Σ for continuous action space
     :param kl_constraint:
-        (float) hard constraint of the covariance in the M-step
+        (float) hard constraint in the M-step
         correspond to [2] p.6 ε_π for discrete action space
-    :param discount_factor: (float) learning rate in the Q-function
+    :param discount_factor: (float) discount factor used in Policy Evaluation
     :param alpha_scale: (float) scaling factor of the lagrangian multiplier in the M-step
-    :param sample_process_num:
     :param sample_episode_num:
     :param sample_episode_maxlen:
     :param sample_action_num:
@@ -100,7 +100,6 @@ class MPO(object):
                  kl_constraint=0.01,
                  discount_factor=0.99,
                  alpha_scale=10,
-                 sample_process_num=5,
                  sample_episode_num=30,
                  sample_episode_maxlen=200,
                  sample_action_num=64,
@@ -128,7 +127,6 @@ class MPO(object):
         self.ε_kl = kl_constraint
         self.γ = discount_factor
         self.α_scale = alpha_scale  # scaling factor of the lagrangian multiplier in the M-step
-        self.sample_process_num = sample_process_num
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxlen = sample_episode_maxlen
         self.sample_action_num = sample_action_num
@@ -235,9 +233,8 @@ class MPO(object):
                     mean_loss_q.append(loss_q.item())
                     mean_est_q.append(q.abs().mean().item())
 
-                    # E-Step
-                    # https://arxiv.org/pdf/1812.02256.pdf
-                    #   4.1 Finding action weights (Step 2)
+                    # E-Step of Policy Improvement
+                    # [2] 4.1 Finding action weights (Step 2)
                     with torch.no_grad():
                         if self.continuous_action_space:
                             # sample N actions per state
@@ -263,14 +260,14 @@ class MPO(object):
                                 self.target_critic.forward(
                                     expanded_states.reshape(-1, ds),  # (K * da, ds)
                                     expanded_actions.reshape(-1, da)  # (K * da, da)
-                                ).reshape(B, da)  # (K, da)
+                                ).reshape(K, da)  # (K, da)
                             ).transpose(0, 1)  # (da, K)
-                            b_prob_np = b_prob.cpu().numpy()  # (da, K)
+                            b_prob_np = b_prob.cpu().transpose(0, 1).numpy()  # (K, da)
                             target_q_np = target_q.cpu().transpose(0, 1).numpy()  # (K, da)
 
                     # https://arxiv.org/pdf/1812.02256.pdf
-                    #   4.1 Finding action weights (Step 2)
-                    #     Using an exponential transformation of the Q-values
+                    # [2] 4.1 Finding action weights (Step 2)
+                    #   Using an exponential transformation of the Q-values
                     if self.continuous_action_space:
                         def dual(η):
                             """
@@ -306,12 +303,13 @@ class MPO(object):
 
                     qij = torch.softmax(target_q / self.η, dim=0)  # (N, K) or (da, K)
 
-                    # M-Step
-                    # https://arxiv.org/pdf/1812.02256.pdf
-                    #   4.2 Fitting an improved policy (Step 3)
+                    # M-Step of Policy Improvement
+                    # [2] 4.2 Fitting an improved policy (Step 3)
                     for _ in range(self.mstep_iteration_num):
                         if self.continuous_action_space:
                             μ, A = self.actor.forward(state_batch)
+                            # First term of last eq of [2] p.5
+                            # see also [2] 4.2.1 Fitting an improved Gaussian policy
                             π1 = MultivariateNormal(loc=μ, scale_tril=b_A)  # (K,)
                             π2 = MultivariateNormal(loc=b_μ, scale_tril=A)  # (K,)
                             loss_p = torch.mean(
@@ -334,6 +332,9 @@ class MPO(object):
                                 raise RuntimeError('kl_Σ is nan')
 
                             # Update lagrange multipliers by gradient descent
+                            # this equation is derived from last eq of [2] p.5,
+                            # just differentiate with respect to α
+                            # and update α so that the equation is to be minimized.
                             self.α_kl_μ -= self.α_scale * (self.ε_kl_μ - kl_μ).detach().item()
                             self.α_kl_Σ -= self.α_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
 
@@ -343,6 +344,7 @@ class MPO(object):
                                 self.α_kl_Σ = 0.0
 
                             self.actor_optimizer.zero_grad()
+                            # last eq of [2] p.5
                             loss_l = -(
                                     loss_p
                                     + self.α_kl_μ * (self.ε_kl_μ - kl_μ)
@@ -353,8 +355,9 @@ class MPO(object):
                             clip_grad_norm_(self.actor.parameters(), 0.1)
                             self.actor_optimizer.step()
                         else:  # discrete action space
-                            π_p = self.actor.forward(state_batch)  # (B, da)
-                            π = Categorical(probs=π_p)  # (B,)
+                            π_p = self.actor.forward(state_batch)  # (K, da)
+                            # First term of last eq of [2] p.5
+                            π = Categorical(probs=π_p)  # (K,)
                             loss_p = torch.mean(
                                 qij * π.expand((da, K)).log_prob(actions)
                             )
@@ -367,12 +370,16 @@ class MPO(object):
                                 raise RuntimeError('kl is nan')
 
                             # Update lagrange multipliers by gradient descent
-                            self.α_kl -= self.α * (self.ε_kl - kl).detach().item()
+                            # this equation is derived from last eq of [2] p.5,
+                            # just differentiate with respect to α
+                            # and update α so that the equation is to be minimized.
+                            self.α_kl -= self.α_scale * (self.ε_kl - kl).detach().item()
 
                             if self.α_kl < 0.0:
                                 self.α_kl = 0.0
 
                             self.actor_optimizer.zero_grad()
+                            # last eq of [2] p.5
                             loss_l = -(loss_p + self.α_kl * (self.ε_kl - kl))
                             mean_loss_l.append(loss_l.item())
                             loss_l.backward()
@@ -453,7 +460,7 @@ class MPO(object):
 
     def save_model(self, path=None):
         """
-        saves the model
+        saves a model to a given path
         :param path: (str) file path (.pt file)
         """
         data = {

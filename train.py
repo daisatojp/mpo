@@ -13,18 +13,17 @@ def main():
     parser.add_argument('--env', type=str, default='LunarLanderContinuous-v2',
                         help='gym environment')
     parser.add_argument('--dual_constraint', type=float, default=0.1,
-                        help='hard constraint of the E-step')
+                        help='hard constraint of the dual formulation in the E-step')
     parser.add_argument('--kl_mean_constraint', type=float, default=0.01,
-                        help='hard constraint on mean parameter')
+                        help='hard constraint of the mean in the M-step')
     parser.add_argument('--kl_var_constraint', type=float, default=1e-4,
-                        help='hard constraint on variance parameter')
+                        help='hard constraint of the covariance in the M-step')
     parser.add_argument('--kl_constraint', type=float, default=0.01,
-                        help='hard constraint on variance parameter')
+                        help='hard constraint in the M-step')
     parser.add_argument('--discount_factor', type=float, default=0.99,
-                        help='discount factor')
+                        help='discount factor used in Policy Evaluation')
     parser.add_argument('--alpha_scale', type=float, default=10.0,
                         help='scaling factor of the lagrangian multiplier in the M-step')
-    parser.add_argument('--sample_process_num', type=int, default=5)
     parser.add_argument('--sample_episode_num', type=int, default=30,
                         help='number of episodes to learn')
     parser.add_argument('--sample_episode_maxlen', type=int, default=200,
@@ -55,7 +54,6 @@ def main():
         kl_constraint=args.kl_constraint,
         discount_factor=args.discount_factor,
         alpha_scale=args.alpha_scale,
-        sample_process_num=args.sample_process_num,
         sample_episode_num=args.sample_episode_num,
         sample_episode_maxlen=args.sample_episode_maxlen,
         sample_action_num=args.sample_action_num,
