@@ -431,7 +431,7 @@ class MPO(object):
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
             if it % model_save_period == 0:
                 self.save_model(os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
-            writer.add_scalar('max_return_eval', self.max_return_eval)
+            writer.add_scalar('max_return_eval', self.max_return_eval, it)
             writer.add_scalar('return_eval', return_eval, it)
             writer.add_scalar('return', mean_return, it)
             writer.add_scalar('reward', mean_reward, it)
