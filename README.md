@@ -5,13 +5,20 @@ Implementation of the Maximum A Posteriori Policy Optimization
 [paper2](https://arxiv.org/abs/1812.02256.pdf))
 Reinforcement Learning Algorithms for [OpenAI gym](https://github.com/openai/gym) environments.
 
-## Support
+## How to Run
 
-* Policy Evaluation
-    - [x] 1-step TD
-    - [ ] Retrace
+I tested on the below environment.
+* Windows 10
+* Python 3.7
+* PyTorch 1.8.1
 
-## How to use
+### INSTALL
+
+Install PyTorch https://pytorch.org/
+
+```bash
+pip install gym Box2D IPython tqdm scipy tensorboard tensorboardx
+```
 
 ### Continuous Action Space
 
@@ -26,7 +33,7 @@ python3 train.py
   --discount_factor 0.99
   --iteration_num 500
   --sample_process_num 5
-  --sample_episode_num 100
+  --sample_episode_num 30
   --sample_episode_maxlen 500
   --sample_action_num 64
   --batch_size 256
@@ -47,7 +54,7 @@ python3 train.py
   --discount_factor 0.99
   --iteration_num 500
   --sample_process_num 5
-  --sample_episode_num 100
+  --sample_episode_num 30
   --sample_episode_maxlen 500
   --batch_size 256
   --episode_rerun_num 3

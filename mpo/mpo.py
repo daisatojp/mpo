@@ -5,7 +5,6 @@ from multiprocessing import Pool
 import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
-from IPython import embed
 import gym
 import torch
 import torch.nn as nn
@@ -325,11 +324,9 @@ class MPO(object):
                             max_kl_Σ.append(kl_Σ.item())
 
                             if debug and np.isnan(kl_μ.item()):
-                                print('kl_μ is nan')
-                                embed()
+                                raise RuntimeError('kl_μ is nan')
                             if debug and np.isnan(kl_Σ.item()):
-                                print('kl_Σ is nan')
-                                embed()
+                                raise RuntimeError('kl_Σ is nan')
 
                             # Update lagrange multipliers by gradient descent
                             self.η_kl_μ -= self.α * (self.ε_kl_μ - kl_μ).detach().item()
@@ -362,8 +359,7 @@ class MPO(object):
                             max_kl.append(kl.item())
 
                             if debug and np.isnan(kl.item()):
-                                print('kl is nan')
-                                embed()
+                                raise RuntimeError('kl is nan')
 
                             # Update lagrange multipliers by gradient descent
                             self.η_kl -= self.α * (self.ε_kl - kl).detach().item()
