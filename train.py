@@ -37,6 +37,8 @@ def main():
                         help='number of reruns of sampled episode')
     parser.add_argument('--mstep_iteration_num', type=int, default=5,
                         help='the number of iterations of the M-Step')
+    parser.add_argument('--evaluate_episode_num', type=int, default=10,
+                        help='number of episodes to evaluate')
     parser.add_argument('--evaluate_episode_maxstep', type=int, default=200,
                         help='maximum evaluate steps of an episode')
     parser.add_argument('--log_dir', type=str, default=None,
@@ -62,6 +64,7 @@ def main():
         batch_size=args.batch_size,
         episode_rerun_num=args.episode_rerun_num,
         mstep_iteration_num=args.mstep_iteration_num,
+        evaluate_episode_num=args.evaluate_episode_num,
         evaluate_episode_maxstep=args.evaluate_episode_maxstep)
 
     if args.load is not None:

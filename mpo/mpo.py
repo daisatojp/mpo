@@ -32,7 +32,7 @@ def gaussian_kl(μi, μ, Ai, A):
     :param μ: (B, n)
     :param Ai: (B, n, n)
     :param A: (B, n, n)
-    :return: C_μ, C_Σ: (B,), (B,)
+    :return: C_μ, C_Σ: scalar
         mean and covariance terms of the KL
     ref : https://stanford.edu/~jduchi/projects/general_notes.pdf page.13
     """
@@ -41,10 +41,15 @@ def gaussian_kl(μi, μ, Ai, A):
     μ = μ.unsqueeze(-1)  # (B, n, 1)
     Σi = Ai @ bt(Ai)  # (B, n, n)
     Σ = A @ bt(A)  # (B, n, n)
+    Σi_det = Σi.det()  # (B,)
+    Σ_det = Σ.det()  # (B,)
+    # determinant could be minus due to numerical calculation error
+    Σi_det = torch.clamp_min(Σi_det, 1e-6)
+    Σ_det = torch.clamp_min(Σ_det, 1e-6)
     Σi_inv = Σi.inverse()  # (B, n, n)
     Σ_inv = Σ.inverse()  # (B, n, n)
     inner_μ = ((μ - μi).transpose(-2, -1) @ Σi_inv @ (μ - μi)).squeeze()  # (B,)
-    inner_Σ = torch.log(Σ.det() / Σi.det()) - n + btr(Σ_inv @ Σi)  # (B,)
+    inner_Σ = torch.log(Σ_det / Σi_det) - n + btr(Σ_inv @ Σi)  # (B,)
     C_μ = 0.5 * torch.mean(inner_μ)
     C_Σ = 0.5 * torch.mean(inner_Σ)
     return C_μ, C_Σ
@@ -105,6 +110,7 @@ class MPO(object):
                  batch_size=256,
                  episode_rerun_num=3,
                  mstep_iteration_num=5,
+                 evaluate_episode_num=100,
                  evaluate_episode_maxstep=200):
         self.device = device
         self.env = env
@@ -133,6 +139,7 @@ class MPO(object):
         self.batch_size = batch_size
         self.episode_rerun_num = episode_rerun_num
         self.mstep_iteration_num = mstep_iteration_num
+        self.evaluate_episode_num = evaluate_episode_num
         self.evaluate_episode_maxstep = evaluate_episode_maxstep
 
         if not self.continuous_action_space:
@@ -516,7 +523,7 @@ class MPO(object):
         """
         with torch.no_grad():
             total_rewards = []
-            for e in tqdm(range(100), desc='evaluating'):
+            for e in tqdm(range(self.evaluate_episode_num), desc='evaluating'):
                 total_reward = 0.0
                 state = self.env.reset()
                 for s in range(self.evaluate_episode_maxstep):
