@@ -1,7 +1,5 @@
 import os
 from time import sleep
-import multiprocessing as mp
-from multiprocessing import Pool
 import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
@@ -471,14 +469,9 @@ class MPO(object):
             ).cpu().numpy()
             next_state, reward, done, _ = self.env.step(action)
             buff.append((state, action, next_state, reward))
-            if self.multiprocessing:
-                if self.render and ((mp.current_process()._identity[0] % self.sample_process_num) == 1):
-                    self.env.render()
-                    sleep(0.01)
-            else:
-                if self.render and i == 0:
-                    self.env.render()
-                    sleep(0.01)
+            if self.render and i == 0:
+                self.env.render()
+                sleep(0.01)
             if done:
                 break
             else:
@@ -487,11 +480,7 @@ class MPO(object):
 
     def __sample_trajectory(self, sample_episode_num):
         self.replaybuffer.clear()
-        if self.multiprocessing:
-            with Pool(self.sample_process_num) as p:
-                episodes = p.map(self.sample_trajectory_worker, range(sample_episode_num))
-        else:
-            episodes = [self.sample_trajectory_worker(i) for i in range(sample_episode_num)]
+        episodes = [self.sample_trajectory_worker(i) for i in tqdm(range(sample_episode_num), desc='sampling ...')]
         self.replaybuffer.store_episodes(episodes)
 
     def __update_critic_td(self,
