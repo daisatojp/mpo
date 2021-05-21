@@ -227,7 +227,7 @@ class MPO(object):
             for r in range(self.episode_rerun_num):
                 for indices in tqdm(
                         BatchSampler(
-                            SubsetRandomSampler(range(buff_sz)), self.batch_size, False),
+                            SubsetRandomSampler(range(buff_sz)), self.batch_size, drop_last=True),
                         desc='training {}/{}'.format(r+1, self.episode_rerun_num)):
                     K = len(indices)  # the sample number of states
                     N = self.sample_action_num  # the sample number of actions per state
