@@ -399,7 +399,7 @@ class MPO(object):
 
                             self.actor_optimizer.zero_grad()
                             # last eq of [2] p.5
-                            loss_l = -(loss_p + self.α_kl * (self.ε_kl - kl))
+                            loss_l = -(loss_p + self.α * (self.ε_kl - kl))
                             mean_loss_l.append(loss_l.item())
                             loss_l.backward()
                             clip_grad_norm_(self.actor.parameters(), 0.1)
