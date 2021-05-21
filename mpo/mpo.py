@@ -44,7 +44,8 @@ def gaussian_kl(μi, μ, Ai, A):
     Σ = A @ bt(A)  # (B, n, n)
     Σi_det = Σi.det()  # (B,)
     Σ_det = Σ.det()  # (B,)
-    # determinant could be minus due to numerical calculation error
+    # determinant can be minus due to numerical calculation error
+    # https://github.com/daisatojp/mpo/issues/11
     Σi_det = torch.clamp_min(Σi_det, 1e-6)
     Σ_det = torch.clamp_min(Σ_det, 1e-6)
     Σi_inv = Σi.inverse()  # (B, n, n)
