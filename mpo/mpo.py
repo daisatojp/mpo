@@ -34,6 +34,7 @@ def gaussian_kl(μi, μ, Ai, A):
     :param A: (B, n, n)
     :return: C_μ, C_Σ: scalar
         mean and covariance terms of the KL
+    :return: mean of determinanats of Σi, Σ
     ref : https://stanford.edu/~jduchi/projects/general_notes.pdf page.13
     """
     n = A.size(-1)
@@ -52,7 +53,7 @@ def gaussian_kl(μi, μ, Ai, A):
     inner_Σ = torch.log(Σ_det / Σi_det) - n + btr(Σ_inv @ Σi)  # (B,)
     C_μ = 0.5 * torch.mean(inner_μ)
     C_Σ = 0.5 * torch.mean(inner_Σ)
-    return C_μ, C_Σ
+    return C_μ, C_Σ, torch.mean(Σi_det), torch.mean(Σ_det)
 
 
 def categorical_kl(p1, p2):
@@ -103,7 +104,12 @@ class MPO(object):
                  kl_var_constraint=0.0001,
                  kl_constraint=0.01,
                  discount_factor=0.99,
+                 alpha_mean_scale=1.0,
+                 alpha_var_scale=100.0,
                  alpha_scale=10.0,
+                 alpha_mean_max=0.1,
+                 alpha_var_max=10.0,
+                 alpha_max=1.0,
                  sample_episode_num=30,
                  sample_episode_maxstep=200,
                  sample_action_num=64,
@@ -132,7 +138,12 @@ class MPO(object):
         self.ε_kl_Σ = kl_var_constraint
         self.ε_kl = kl_constraint
         self.γ = discount_factor
-        self.α_scale = alpha_scale  # scaling factor of the lagrangian multiplier in the M-step
+        self.α_μ_scale = alpha_mean_scale
+        self.α_Σ_scale = alpha_var_scale
+        self.α_scale = alpha_scale
+        self.α_μ_max = alpha_mean_max
+        self.α_Σ_max = alpha_var_max
+        self.α_max = alpha_max
         self.sample_episode_num = sample_episode_num
         self.sample_episode_maxstep = sample_episode_maxstep
         self.sample_action_num = sample_action_num
@@ -168,9 +179,9 @@ class MPO(object):
         self.norm_loss_q = nn.SmoothL1Loss()
 
         self.η = np.random.rand()
-        self.α_kl_μ = 0.0  # lagrangian multiplier for continuous action space in the M-step
-        self.α_kl_Σ = 0.0  # lagrangian multiplier for continuous action space in the M-step
-        self.α_kl = 0.0  # lagrangian multiplier for discrete action space in the M-step
+        self.α_μ = 0.0  # lagrangian multiplier for continuous action space in the M-step
+        self.α_Σ = 0.0  # lagrangian multiplier for continuous action space in the M-step
+        self.α = 0.0  # lagrangian multiplier for discrete action space in the M-step
 
         self.replaybuffer = ReplayBuffer()
 
@@ -210,6 +221,7 @@ class MPO(object):
             max_kl_μ = []
             max_kl_Σ = []
             max_kl = []
+            mean_Σ_det = []
 
             for r in range(self.episode_rerun_num):
                 for indices in tqdm(
@@ -238,8 +250,6 @@ class MPO(object):
                         reward_batch=reward_batch,
                         sample_num=self.sample_action_num
                     )
-                    if loss_q is None:
-                        raise RuntimeError('invalid policy evaluation')
                     mean_loss_q.append(loss_q.item())
                     mean_est_q.append(q.abs().mean().item())
 
@@ -330,11 +340,12 @@ class MPO(object):
                             )
                             mean_loss_p.append((-loss_p).item())
 
-                            kl_μ, kl_Σ = gaussian_kl(
+                            kl_μ, kl_Σ, Σi_det, Σ_det = gaussian_kl(
                                 μi=b_μ, μ=μ,
                                 Ai=b_A, A=A)
                             max_kl_μ.append(kl_μ.item())
                             max_kl_Σ.append(kl_Σ.item())
+                            mean_Σ_det.append(Σ_det.item())
 
                             if np.isnan(kl_μ.item()):  # This should not happen
                                 raise RuntimeError('kl_μ is nan')
@@ -345,20 +356,18 @@ class MPO(object):
                             # this equation is derived from last eq of [2] p.5,
                             # just differentiate with respect to α
                             # and update α so that the equation is to be minimized.
-                            self.α_kl_μ -= self.α_scale * (self.ε_kl_μ - kl_μ).detach().item()
-                            self.α_kl_Σ -= self.α_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
+                            self.α_μ -= self.α_μ_scale * (self.ε_kl_μ - kl_μ).detach().item()
+                            self.α_Σ -= self.α_Σ_scale * (self.ε_kl_Σ - kl_Σ).detach().item()
 
-                            if self.α_kl_μ < 0.0:
-                                self.α_kl_μ = 0.0
-                            if self.α_kl_Σ < 0.0:
-                                self.α_kl_Σ = 0.0
+                            self.α_μ = np.clip(0.0, self.α_μ, self.α_μ_max)
+                            self.α_Σ = np.clip(0.0, self.α_Σ, self.α_Σ_max)
 
                             self.actor_optimizer.zero_grad()
                             # last eq of [2] p.5
                             loss_l = -(
                                     loss_p
-                                    + self.α_kl_μ * (self.ε_kl_μ - kl_μ)
-                                    + self.α_kl_Σ * (self.ε_kl_Σ - kl_Σ)
+                                    + self.α_μ * (self.ε_kl_μ - kl_μ)
+                                    + self.α_Σ * (self.ε_kl_Σ - kl_Σ)
                             )
                             mean_loss_l.append(loss_l.item())
                             loss_l.backward()
@@ -383,10 +392,9 @@ class MPO(object):
                             # this equation is derived from last eq of [2] p.5,
                             # just differentiate with respect to α
                             # and update α so that the equation is to be minimized.
-                            self.α_kl -= self.α_scale * (self.ε_kl - kl).detach().item()
+                            self.α -= self.α_scale * (self.ε_kl - kl).detach().item()
 
-                            if self.α_kl < 0.0:
-                                self.α_kl = 0.0
+                            self.α = np.clip(self.α, 0.0, self.α_max)
 
                             self.actor_optimizer.zero_grad()
                             # last eq of [2] p.5
@@ -403,10 +411,6 @@ class MPO(object):
             self.actor.train()
             self.max_return_eval = max(self.max_return_eval, return_eval)
 
-            self.α_kl_μ = 0.0
-            self.α_kl_Σ = 0.0
-            self.α_kl = 0.0
-
             it = it + 1
             mean_loss_q = np.mean(mean_loss_q)
             mean_loss_p = np.mean(mean_loss_p)
@@ -415,6 +419,7 @@ class MPO(object):
             if self.continuous_action_space:
                 max_kl_μ = np.max(max_kl_μ)
                 max_kl_Σ = np.max(max_kl_Σ)
+                mean_Σ_det = np.mean(mean_Σ_det)
             else:  # discrete action space
                 max_kl = np.max(max_kl)
 
@@ -431,8 +436,12 @@ class MPO(object):
             if self.continuous_action_space:
                 print('  max_kl_μ :', max_kl_μ)
                 print('  max_kl_Σ :', max_kl_Σ)
+                print('  mean_Σ_det :', mean_Σ_det)
+                print('  α_μ :', self.α_μ)
+                print('  α_Σ :', self.α_Σ)
             else:  # discrete action space
                 print('  max_kl :', max_kl)
+                print('  α :', self.α)
 
             # saving and logging
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
@@ -450,8 +459,12 @@ class MPO(object):
             if self.continuous_action_space:
                 writer.add_scalar('max_kl_μ', max_kl_μ, it)
                 writer.add_scalar('max_kl_Σ', max_kl_Σ, it)
+                writer.add_scalar('mean_Σ_det', mean_Σ_det, it)
+                writer.add_scalar('α_μ', self.α_μ, it)
+                writer.add_scalar('α_Σ', self.α_Σ, it)
             else:
                 writer.add_scalar('η_kl', max_kl, it)
+                writer.add_scalar('α', self.α, it)
             writer.flush()
 
         # end training
