@@ -34,7 +34,7 @@ def main():
                         help='maximum value of the lagrangian multiplier in the M-step')
     parser.add_argument('--alpha_max', type=float, default=1.0,
                         help='maximum value of the lagrangian multiplier in the M-step')
-    parser.add_argument('--sample_episode_num', type=int, default=30,
+    parser.add_argument('--sample_episode_num', type=int, default=50,
                         help='number of episodes to learn')
     parser.add_argument('--sample_episode_maxstep', type=int, default=300,
                         help='maximum sample steps of an episode')
@@ -47,7 +47,9 @@ def main():
                         help='number of reruns of sampled episode')
     parser.add_argument('--mstep_iteration_num', type=int, default=5,
                         help='the number of iterations of the M-Step')
-    parser.add_argument('--evaluate_episode_num', type=int, default=10,
+    parser.add_argument('--evaluate_period', type=int, default=10,
+                        help='periode of evaluation')
+    parser.add_argument('--evaluate_episode_num', type=int, default=100,
                         help='number of episodes to evaluate')
     parser.add_argument('--evaluate_episode_maxstep', type=int, default=300,
                         help='maximum evaluate steps of an episode')
@@ -79,6 +81,7 @@ def main():
         batch_size=args.batch_size,
         episode_rerun_num=args.episode_rerun_num,
         mstep_iteration_num=args.mstep_iteration_num,
+        evaluate_period=args.evaluate_period,
         evaluate_episode_num=args.evaluate_episode_num,
         evaluate_episode_maxstep=args.evaluate_episode_maxstep)
 

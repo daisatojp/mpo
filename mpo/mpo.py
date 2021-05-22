@@ -117,6 +117,7 @@ class MPO(object):
                  batch_size=256,
                  episode_rerun_num=3,
                  mstep_iteration_num=5,
+                 evaluate_period=10,
                  evaluate_episode_num=100,
                  evaluate_episode_maxstep=200):
         self.device = device
@@ -151,6 +152,7 @@ class MPO(object):
         self.batch_size = batch_size
         self.episode_rerun_num = episode_rerun_num
         self.mstep_iteration_num = mstep_iteration_num
+        self.evaluate_period = evaluate_period
         self.evaluate_episode_num = evaluate_episode_num
         self.evaluate_episode_maxstep = evaluate_episode_maxstep
 
@@ -187,11 +189,11 @@ class MPO(object):
         self.replaybuffer = ReplayBuffer()
 
         self.max_return_eval = -np.inf
-        self.iteration = 0
+        self.iteration = 1
         self.render = False
 
     def train(self,
-              iteration_num=500,
+              iteration_num=1000,
               log_dir='log',
               model_save_period=10,
               render=False):
@@ -209,7 +211,7 @@ class MPO(object):
             os.makedirs(model_save_dir)
         writer = SummaryWriter(os.path.join(log_dir, 'tb'))
 
-        for it in range(self.iteration, iteration_num):
+        for it in range(self.iteration, iteration_num + 1):
             self.__sample_trajectory(self.sample_episode_num)
             buff_sz = len(self.replaybuffer)
 
@@ -407,12 +409,13 @@ class MPO(object):
 
             self.__update_param()
 
-            self.actor.eval()
-            return_eval = self.__evaluate()
-            self.actor.train()
-            self.max_return_eval = max(self.max_return_eval, return_eval)
+            return_eval = None
+            if it % self.evaluate_period == 0:
+                self.actor.eval()
+                return_eval = self.__evaluate()
+                self.actor.train()
+                self.max_return_eval = max(self.max_return_eval, return_eval)
 
-            it = it + 1
             mean_loss_q = np.mean(mean_loss_q)
             mean_loss_p = np.mean(mean_loss_p)
             mean_loss_l = np.mean(mean_loss_l)
@@ -425,8 +428,9 @@ class MPO(object):
                 max_kl = np.max(max_kl)
 
             print('iteration :', it)
-            print('  max_return_eval :', self.max_return_eval)
-            print('  return_eval :', return_eval)
+            if it % self.evaluate_period == 0:
+                print('  max_return_eval :', self.max_return_eval)
+                print('  return_eval :', return_eval)
             print('  mean return :', mean_return)
             print('  mean reward :', mean_reward)
             print('  mean loss_q :', mean_loss_q)
@@ -444,12 +448,13 @@ class MPO(object):
                 print('  max_kl :', max_kl)
                 print('  α :', self.α)
 
-            # saving and logging
             self.save_model(os.path.join(model_save_dir, 'model_latest.pt'))
             if it % model_save_period == 0:
                 self.save_model(os.path.join(model_save_dir, 'model_{}.pt'.format(it)))
-            writer.add_scalar('max_return_eval', self.max_return_eval, it)
-            writer.add_scalar('return_eval', return_eval, it)
+
+            if it % self.evaluate_period == 0:
+                writer.add_scalar('max_return_eval', self.max_return_eval, it)
+                writer.add_scalar('return_eval', return_eval, it)
             writer.add_scalar('return', mean_return, it)
             writer.add_scalar('reward', mean_reward, it)
             writer.add_scalar('loss_q', mean_loss_q, it)
