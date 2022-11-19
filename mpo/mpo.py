@@ -514,17 +514,17 @@ class MPO(object):
 
     def __sample_trajectory_worker(self, i):
         buff = []
-        state = self.env.reset()
+        state, _ = self.env.reset()
         for steps in range(self.sample_episode_maxstep):
             action = self.target_actor.action(
                 torch.from_numpy(state).type(torch.float32).to(self.device)
             ).cpu().numpy()
-            next_state, reward, done, _ = self.env.step(action)
+            next_state, reward, termination, _, _ = self.env.step(action)
             buff.append((state, action, next_state, reward))
             if self.render and i == 0:
                 self.env.render()
                 sleep(0.01)
-            if done:
+            if termination:
                 break
             else:
                 state = next_state
@@ -544,14 +544,14 @@ class MPO(object):
             total_rewards = []
             for e in tqdm(range(self.evaluate_episode_num), desc='evaluating'):
                 total_reward = 0.0
-                state = self.env.reset()
+                state, _ = self.env.reset()
                 for s in range(self.evaluate_episode_maxstep):
                     action = self.actor.action(
                         torch.from_numpy(state).type(torch.float32).to(self.device)
                     ).cpu().numpy()
-                    state, reward, done, _ = self.env.step(action)
+                    state, reward, termination, _, _ = self.env.step(action)
                     total_reward += reward
-                    if done:
+                    if termination:
                         break
                 total_rewards.append(total_reward)
             return np.mean(total_rewards)
